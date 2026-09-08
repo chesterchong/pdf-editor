@@ -12,10 +12,15 @@ import {
   BlendMode,
   PDFDocument,
   degrees,
+  radians,
+  rgb,
   concatTransformationMatrix,
   popGraphicsState,
   pushGraphicsState,
 } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
+import { FontBook } from "./fonts";
+import { stripFromPage, type Removal } from "./content";
 import "@fontsource/dancing-script/400.css";
 import "@fontsource/dancing-script/700.css";
 import "@fontsource/great-vibes/400.css";
@@ -83,6 +88,9 @@ type Cover = {
   width: number;
   height: number;
   color: string;
+  /** Original content to delete from the page on export; the cover is only
+   * painted if that deletion could not be done. */
+  removal?: Removal;
 };
 type Item = Stroke | Highlight | TextItem | ImageItem | Cover;
 
@@ -191,9 +199,10 @@ function fontString(item: TextItem) {
   }px "${item.font}", sans-serif`;
 }
 
-function layoutText(item: TextItem) {
+function layoutText(item: TextItem, measure?: (s: string) => number) {
   measureCtx.font = fontString(item);
-  const fits = (s: string) => measureCtx.measureText(s).width <= item.width;
+  const width = measure ?? ((s: string) => measureCtx.measureText(s).width);
+  const fits = (s: string) => width(s) <= item.width;
   const lines: string[] = [];
   for (const para of item.text.split("\n")) {
     let line = "";
@@ -729,6 +738,12 @@ async function mergePdfs(sources: Uint8Array[]) {
     for (const page of await out.copyPages(src, src.getPageIndices())) out.addPage(page);
   }
   return out.save();
+}
+
+function pdfColor(hex: string) {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(hex);
+  if (!m) return rgb(0.09, 0.13, 0.2);
+  return rgb(parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255);
 }
 
 function pct(value: number, total: number) {
@@ -1672,7 +1687,16 @@ export default function App() {
     const r = { x: line.x0, y: line.y0, w: line.x1 - line.x0, h: line.y1 - line.y0 };
     const { ink, paper } = sampleRegion(canvas, viewport, r);
     const size = line.size ?? r.h / 1.12;
-    const cover: Cover = { kind: "cover", id: uid(), x: r.x - 2, y: r.y - 1, width: r.w + 4, height: r.h + 2, color: paper };
+    const cover: Cover = {
+      kind: "cover",
+      id: uid(),
+      x: r.x - 2,
+      y: r.y - 1,
+      width: r.w + 4,
+      height: r.h + 2,
+      color: paper,
+      removal: { kind: "text", rect: r },
+    };
     const item: TextItem = {
       kind: "text",
       id: uid(),
@@ -1716,7 +1740,16 @@ export default function App() {
     }
     const ring = { x: r.x - 3, y: r.y - 3, w: r.w + 6, h: r.h + 6 };
     const { paper } = sampleRegion(canvas, viewport, ring);
-    const cover: Cover = { kind: "cover", id: uid(), x: r.x - 1, y: r.y - 1, width: r.w + 2, height: r.h + 2, color: paper };
+    const cover: Cover = {
+      kind: "cover",
+      id: uid(),
+      x: r.x - 1,
+      y: r.y - 1,
+      width: r.w + 2,
+      height: r.h + 2,
+      color: paper,
+      removal: { kind: "image", rect: r },
+    };
     const item: ImageItem = { kind: "image", id: uid(), x: r.x, y: r.y, width: r.w, height: r.h, image };
     setItems([...(itemsRef.current[pageNumber] ?? []), cover, item]);
     setSelectedId(item.id);
@@ -2034,6 +2067,8 @@ export default function App() {
         .filter((i): i is TextItem => i.kind === "text");
       await Promise.all(allText.map((i) => document.fonts.load(fontString(i))));
       const output = await PDFDocument.load(source.slice());
+      output.registerFontkit(fontkit);
+      const fonts = new FontBook(output);
       const pageKeys = watermark
         ? Array.from({ length: pdf.numPages }, (_, i) => String(i + 1))
         : Object.keys(itemsRef.current);
@@ -2047,24 +2082,26 @@ export default function App() {
         const originalPage = await pdf.getPage(index);
         const view = originalPage.getViewport({ scale: 1.25 });
         const target = output.getPage(index - 1);
+
+        // Tier 2: delete the original text/images that were lifted. Covers whose
+        // originals could be deleted are not painted.
+        const covers = drawable.filter((i): i is Cover => i.kind === "cover" && !!i.removal);
+        const stripped = new Set<string>();
+        if (covers.length) {
+          const ok = stripFromPage(output, index - 1, view, covers.map((c) => c.removal!));
+          covers.forEach((c, k) => {
+            if (ok[k]) stripped.add(c.id);
+          });
+        }
+
         // Map the visible overlay back into PDF coordinates.
         // This also accounts for rotated pages and crop-box offsets.
         const origin = view.convertToPdfPoint(0, view.height);
         const right = view.convertToPdfPoint(view.width, view.height);
         const top = view.convertToPdfPoint(0, 0);
-        // Highlights go down first with a multiply blend (behind the ink),
-        // then everything else on top.
-        const layers: [PaintLayer, BlendMode][] = [
-          ["highlights", BlendMode.Multiply],
-          ["marks", BlendMode.Normal],
-        ];
-        for (const [layer, blendMode] of layers) {
-          const hasContent =
-            drawable.some((i) => (i.kind === "highlight") === (layer === "highlights")) ||
-            (layer === "highlights" && !!watermark);
-          if (!hasContent) continue;
+        const drawLayer = async (items: Item[], layer: PaintLayer, blendMode: BlendMode, wm: Watermark | null) => {
           const canvas = document.createElement("canvas");
-          paint(canvas, view, drawable, null, layer, layer === "highlights" ? watermark : null);
+          paint(canvas, view, items, null, layer, wm);
           const png = await output.embedPng(await (await canvasBlob(canvas)).arrayBuffer());
           canvas.width = 0;
           canvas.height = 0;
@@ -2081,7 +2118,47 @@ export default function App() {
           );
           target.drawImage(png, { x: 0, y: 0, width: 1, height: 1, blendMode });
           target.pushOperators(popGraphicsState());
+        };
+
+        // 1. Highlights and watermark, blended behind the ink.
+        if (drawable.some((i) => i.kind === "highlight") || watermark) {
+          await drawLayer(drawable, "highlights", BlendMode.Multiply, watermark);
         }
+        // 2. Strokes, images and any covers that still need painting.
+        const raster = drawable.filter((i) => i.kind !== "text" && i.kind !== "highlight" && !(i.kind === "cover" && stripped.has(i.id)));
+        if (raster.length) await drawLayer(raster, "marks", BlendMode.Normal, null);
+
+        // 3. Tier 1: text as real, selectable PDF text. Anything a font cannot
+        //    encode falls back to the raster layer.
+        const pxToPt = Math.hypot(right[0] - origin[0], right[1] - origin[1]) / view.width;
+        const angle = Math.atan2(right[1] - origin[1], right[0] - origin[0]);
+        const fallback: Item[] = [];
+        for (const item of drawable) {
+          if (item.kind !== "text") continue;
+          try {
+            const { font, ascent } = await fonts.get({ family: item.font, bold: item.bold, italic: item.italic });
+            const { lines, lineHeight } = layoutText(item, (str) => font.widthOfTextAtSize(str, item.size));
+            for (const line of lines) font.encodeText(line); // throws for unsupported characters
+            const color = pdfColor(item.color);
+            lines.forEach((line, i) => {
+              const lineTop = item.y + i * lineHeight + (lineHeight - item.size) / 2;
+              const baseline = lineTop + item.size * ascent;
+              const [x, y] = view.convertToPdfPoint(item.x, baseline);
+              target.drawText(line, { x, y, size: item.size * pxToPt, font, color, rotate: radians(angle) });
+              const w = font.widthOfTextAtSize(line, item.size);
+              const rule = (yy: number) => {
+                const a = view.convertToPdfPoint(item.x, yy);
+                const b = view.convertToPdfPoint(item.x + w, yy);
+                target.drawLine({ start: { x: a[0], y: a[1] }, end: { x: b[0], y: b[1] }, thickness: Math.max(0.5, (item.size / 14) * pxToPt), color });
+              };
+              if (item.underline) rule(lineTop + item.size * 0.92);
+              if (item.strike) rule(lineTop + item.size * 0.55);
+            });
+          } catch {
+            fallback.push(item);
+          }
+        }
+        if (fallback.length) await drawLayer(fallback, "marks", BlendMode.Normal, null);
       }
       const bytes = await output.save();
       const blob = new Blob([new Uint8Array(bytes).buffer], {
