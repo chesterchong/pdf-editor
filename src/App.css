@@ -279,7 +279,8 @@ button.link:hover:not(:disabled) {
   flex-direction: column;
   align-items: stretch;
   gap: 12px;
-  width: 268px;
+  /* 64px label + gap + 8 swatches + picker trigger must fit on one row. */
+  width: 328px;
   padding: 12px 14px 14px;
 }
 .tool-pop-title {
@@ -309,6 +310,10 @@ button.link:hover:not(:disabled) {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+}
+.quick-colors .cp {
+  margin-left: 4px;
 }
 .quick-swatch {
   flex: 0 0 18px;
