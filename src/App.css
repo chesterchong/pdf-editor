@@ -568,11 +568,12 @@ button.link:hover:not(:disabled) {
   position: relative;
   overflow: auto;
   /* Clear the floating top bar, rail and bottom bar. */
-  padding: 80px 28px 74px 84px;
+  padding: 80px 72px 118px 84px;
   background: #e6eaf2;
 }
 .page {
   position: relative;
+  z-index: 0; /* own stacking context so the page stack can sit behind the canvas */
   max-width: 100%;
   transition: width 0.08s ease-out;
   margin: 0 auto;
@@ -581,6 +582,41 @@ button.link:hover:not(:disabled) {
 }
 .page.zoomed {
   max-width: none;
+}
+/* Following pages, fanned out behind the current one. Only the offset edge
+   shows; it is a button that jumps to that page. */
+.sheet {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 2px;
+  background: white;
+  box-shadow: 0 1px 3px #17203326, 0 10px 30px -14px #17203352;
+  transform: translate(calc(var(--depth) * 14px), calc(var(--depth) * 14px));
+  filter: brightness(calc(1 - var(--depth) * 0.035));
+  cursor: pointer;
+  transition: transform 0.16s cubic-bezier(0.2, 0.8, 0.2, 1), filter 0.16s;
+}
+.sheet:hover:not(:disabled) {
+  background: white;
+  transform: translate(calc(var(--depth) * 14px + 12px), calc(var(--depth) * 14px));
+  filter: none;
+}
+.sheet:focus-visible {
+  outline: 2px solid #93b4ff;
+  outline-offset: 2px;
+}
+.sheet .thumb {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: top left;
+  border-radius: 2px;
+  pointer-events: none;
 }
 .pdf-canvas {
   display: block;

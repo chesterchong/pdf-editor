@@ -2038,6 +2038,27 @@ export default function App() {
             className={`page tool-${tool} ${zoom !== 1 ? "zoomed" : ""}`}
             style={{ width: (viewport?.width || 800) * zoom }}
           >
+            {viewport && !cropRect &&
+              // Following pages fan out behind the current sheet; click one to jump to it.
+              Array.from({ length: Math.min(3, pdf.numPages - pageNumber) }, (_, i) => pageNumber + 1 + i)
+                .reverse()
+                .map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    className="sheet"
+                    style={{ "--depth": n - pageNumber } as CSSProperties}
+                    title={`Go to page ${n}`}
+                    aria-label={`Go to page ${n}`}
+                    disabled={busy}
+                    onClick={() => {
+                      finishEditing();
+                      setPageNumber(n);
+                    }}
+                  >
+                    <PageThumb pdf={pdf} index={n} width={Math.round(viewport.width)} fill />
+                  </button>
+                ))}
             <canvas ref={pageCanvas} className="pdf-canvas" />
             <canvas
               ref={overlayCanvas}
