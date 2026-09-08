@@ -573,13 +573,6 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: right;
-  animation: status-in 0.2s ease-out;
-}
-@keyframes status-in {
-  from {
-    opacity: 0;
-    transform: translateX(4px);
-  }
 }
 .bottombar .pages {
   display: flex;

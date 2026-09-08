@@ -868,7 +868,9 @@ export default function App() {
       setAnnotations({});
       history.current = {};
       future.current = {};
-      setStatus("");
+      setStatus(
+        `Opened ${file.name} · ${document.numPages} ${document.numPages === 1 ? "page" : "pages"}.`,
+      );
     } catch (error) {
       setStatus(`Could not open PDF: ${message(error)}`);
     } finally {
@@ -1687,7 +1689,7 @@ export default function App() {
           </div>
         )}
         <div className="bottombar-right">
-          <p key={status} className="status" role="status" title={status}>
+          <p className="status" role="status" title={status}>
             {status}
           </p>
           {pdf && (
