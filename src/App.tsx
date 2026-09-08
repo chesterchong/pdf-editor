@@ -10,7 +10,12 @@ import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
   BlendMode,
+  PDFArray,
+  PDFDict,
   PDFDocument,
+  PDFName,
+  PDFRef,
+  PDFString,
   degrees,
   radians,
   rgb,
@@ -69,6 +74,20 @@ type TextItem = {
   strike: boolean;
   /** Created with the Signature tool: fixed script font, no text toolbar. */
   signature?: boolean;
+  /** Optional hyperlink placed over the whole box on export. */
+  href?: string;
+};
+/** A hyperlink area. With `replaces`, it stands in for an original link
+ * annotation on the page (an empty url means "remove that link"). */
+type LinkItem = {
+  kind: "link";
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  url: string;
+  replaces?: Rect;
 };
 type ImageItem = {
   kind: "image";
@@ -95,7 +114,10 @@ type Cover = {
    * cover is then never painted. */
   stripped?: boolean;
 };
-type Item = Stroke | Highlight | TextItem | ImageItem | Cover;
+type Item = Stroke | Highlight | TextItem | ImageItem | Cover | LinkItem;
+
+/** A link annotation found on the original page. */
+type PageLink = { url: string; rect: Rect };
 
 type Watermark = {
   text: string;
@@ -242,7 +264,7 @@ function itemRect(item: Item): Rect {
   if (item.kind === "text") {
     return { x: item.x, y: item.y, w: item.width, h: layoutText(item).height };
   }
-  if (item.kind === "image" || item.kind === "cover") {
+  if (item.kind === "image" || item.kind === "cover" || item.kind === "link") {
     return { x: item.x, y: item.y, w: item.width, h: item.height };
   }
   if (item.kind === "highlight") {
@@ -353,7 +375,7 @@ function paint(
     ctx.fillRect(item.x, item.y, item.width, item.height);
   }
   for (const item of items) {
-    if (item.id === skipId || item.kind === "highlight" || item.kind === "cover") continue;
+    if (item.id === skipId || item.kind === "highlight" || item.kind === "cover" || item.kind === "link") continue;
     ctx.save();
     if (item.kind === "text") {
       const { lines, lineHeight } = layoutText(item);
@@ -711,6 +733,10 @@ function rotateItems(items: Item[], delta: number, W: number, H: number): Item[]
       const r = rect({ x: i.x, y: i.y, w: i.width, h: i.height });
       return { ...i, x: r.x, y: r.y, width: r.w, height: r.h };
     }
+    if (i.kind === "link") {
+      const r = rect({ x: i.x, y: i.y, w: i.width, h: i.height });
+      return { ...i, x: r.x, y: r.y, width: r.w, height: r.h, replaces: i.replaces ? rect(i.replaces) : undefined };
+    }
     const r = itemRect(i);
     const c = pt({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
     return { ...i, x: c.x - r.w / 2, y: c.y - r.h / 2 };
@@ -723,8 +749,34 @@ function shiftItems(items: Item[], dx: number, dy: number): Item[] {
       ? { ...i, points: i.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) }
       : i.kind === "highlight"
         ? { ...i, rects: i.rects.map((r) => ({ ...r, x: r.x + dx, y: r.y + dy })) }
-        : { ...i, x: i.x + dx, y: i.y + dy },
+        : i.kind === "link"
+          ? { ...i, x: i.x + dx, y: i.y + dy, replaces: i.replaces ? { ...i.replaces, x: i.replaces.x + dx, y: i.replaces.y + dy } : undefined }
+          : { ...i, x: i.x + dx, y: i.y + dy },
   );
+}
+
+/** Viewport-space rectangle of a PDF annotation rect [x1, y1, x2, y2]. */
+function annotRect(view: PageViewport, rect: number[]): Rect {
+  const [a, b] = view.convertToViewportPoint(rect[0], rect[1]);
+  const [c, d] = view.convertToViewportPoint(rect[2], rect[3]);
+  return { x: Math.min(a, c), y: Math.min(b, d), w: Math.abs(c - a), h: Math.abs(d - b) };
+}
+
+function rectOverlap(a: Rect, b: Rect) {
+  const x = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+  const y = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  const inter = x * y;
+  const union = a.w * a.h + b.w * b.h - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+function linkLabel(url: string) {
+  try {
+    const u = new URL(url);
+    return u.hostname.replace(/^www\./, "") + (u.pathname !== "/" ? u.pathname : "");
+  } catch {
+    return url;
+  }
 }
 
 /** Re-key annotations for a new page order: `order[i]` is the 1-based old page that becomes page i+1. */
@@ -792,6 +844,8 @@ export default function App() {
   const [signText, setSignText] = useState("");
   const [textStyle, setTextStyle] = useState({ bold: false, italic: false, underline: false, strike: false });
   const [imageRegions, setImageRegions] = useState<Rect[]>([]);
+  const [pageLinks, setPageLinks] = useState<PageLink[]>([]);
+  const [linkEdit, setLinkEdit] = useState<{ rect: Rect; url: string; target: { kind: "original"; rect: Rect } | { kind: "item"; id: string } | { kind: "new" } } | null>(null);
   const [hoverRegion, setHoverRegion] = useState<Rect | null>(null);
   const hoverKey = useRef("");
   const [ocr, setOcr] = useState({ running: false, progress: 0 });
@@ -958,6 +1012,14 @@ export default function App() {
         };
         const lines = buildLines(content.items, view, fontOf);
         if (!cancelled) setTextLines(lines.length ? lines : (ocrCache.current[pageNumber] ?? lines));
+        const annots = (await page.getAnnotations()) as { subtype?: string; url?: string; unsafeUrl?: string; dest?: unknown; rect?: number[] }[];
+        if (!cancelled) {
+          setPageLinks(
+            annots
+              .filter((a) => a.subtype === "Link" && a.rect && (a.url || a.unsafeUrl || a.dest))
+              .map((a) => ({ url: a.url ?? a.unsafeUrl ?? "", rect: annotRect(view, a.rect!) })),
+          );
+        }
       } catch (error) {
         if (cancelled || error instanceof RenderingCancelledException) return;
         setStatus(`Preview error: ${message(error)}`);
@@ -1201,6 +1263,7 @@ export default function App() {
       if (event.key === "Escape" || (event.key === "Enter" && !typing && !onControl)) {
         if (typing && event.key === "Escape") (target as HTMLElement).blur();
         if (cropRect) setCropRect(null);
+        if (linkEdit) setLinkEdit(null);
         if (editingId) finishEditing();
         if (organizing) setOrganizing(false);
         setPanelOpen(false);
@@ -1925,6 +1988,46 @@ export default function App() {
     }
   }
 
+  /** Links shown in Edit mode: originals not replaced by an item, plus link items. */
+  function visibleLinks(): { rect: Rect; url: string; target: { kind: "original"; rect: Rect } | { kind: "item"; id: string } }[] {
+    const linkItems = items.filter((i): i is LinkItem => i.kind === "link");
+    const out: { rect: Rect; url: string; target: { kind: "original"; rect: Rect } | { kind: "item"; id: string } }[] = [];
+    for (const l of pageLinks) {
+      if (linkItems.some((li) => li.replaces && rectOverlap(li.replaces, l.rect) > 0.5)) continue;
+      out.push({ rect: l.rect, url: l.url, target: { kind: "original", rect: l.rect } });
+    }
+    for (const li of linkItems) {
+      if (!li.url) continue; // pure removal of an original
+      out.push({ rect: { x: li.x, y: li.y, w: li.width, h: li.height }, url: li.url, target: { kind: "item", id: li.id } });
+    }
+    return out;
+  }
+
+  function applyLinkEdit(url: string) {
+    if (!linkEdit) return;
+    const clean = url.trim();
+    const r = linkEdit.rect;
+    if (linkEdit.target.kind === "item") {
+      if (clean) updateItem(linkEdit.target.id, { url: clean });
+      else removeItem(linkEdit.target.id);
+    } else if (clean) {
+      addItem({
+        kind: "link",
+        id: uid(),
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        url: clean,
+        replaces: linkEdit.target.kind === "original" ? linkEdit.target.rect : undefined,
+      });
+    } else if (linkEdit.target.kind === "original") {
+      addItem({ kind: "link", id: uid(), x: r.x, y: r.y, width: r.w, height: r.h, url: "", replaces: linkEdit.target.rect });
+    }
+    setLinkEdit(null);
+    setStatus(clean ? "Link saved" : "Link removed");
+  }
+
   function pointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
     if (!viewport || busy || event.button !== 0 || !event.isPrimary) return;
     // Stop the browser's mousedown focus change from blurring a text box we
@@ -1943,6 +2046,10 @@ export default function App() {
         return;
       }
       const region = findRegion(p);
+      if (region && event.shiftKey) {
+        setLinkEdit({ rect: region.rect, url: "", target: { kind: "new" } });
+        return;
+      }
       if (region?.kind === "text") liftText(region.line);
       else if (region) void liftImage(region.rect);
       else setSelectedId(null);
@@ -2232,7 +2339,9 @@ export default function App() {
           await drawLayer(drawable, "highlights", BlendMode.Multiply, watermark);
         }
         // 2. Strokes, images and any covers that still need painting.
-        const raster = drawable.filter((i) => i.kind !== "text" && i.kind !== "highlight" && !(i.kind === "cover" && stripped.has(i.id)));
+        const raster = drawable.filter(
+          (i) => i.kind !== "text" && i.kind !== "highlight" && i.kind !== "link" && !(i.kind === "cover" && stripped.has(i.id)),
+        );
         if (raster.length) await drawLayer(raster, "marks", BlendMode.Normal, null);
 
         // 3. Tier 1: text as real, selectable PDF text. Anything a font cannot
@@ -2266,6 +2375,49 @@ export default function App() {
           }
         }
         if (fallback.length) await drawLayer(fallback, "marks", BlendMode.Normal, null);
+
+        // Links: drop original link annotations that were edited or removed,
+        // then add link annotations for link items and linked text boxes.
+        const linkItems = drawable.filter((i): i is LinkItem => i.kind === "link");
+        const linkedText = drawable.filter((i): i is TextItem => i.kind === "text" && !!i.href);
+        if (linkItems.length || linkedText.length) {
+          const replaced = linkItems.filter((l) => l.replaces).map((l) => l.replaces!);
+          const annots = target.node.Annots();
+          if (annots && replaced.length) {
+            const keep = PDFArray.withContext(output.context);
+            for (const el of annots.asArray()) {
+              const dict = el instanceof PDFRef ? output.context.lookup(el) : el;
+              let drop = false;
+              if (dict instanceof PDFDict) {
+                const subtype = dict.lookup(PDFName.of("Subtype"));
+                const rectArr = dict.lookup(PDFName.of("Rect"));
+                if (subtype instanceof PDFName && subtype.decodeText() === "Link" && rectArr instanceof PDFArray) {
+                  const nums = rectArr.asArray().map((n) => Number((n as { asNumber?: () => number }).asNumber?.() ?? NaN));
+                  if (nums.every((n) => Number.isFinite(n))) {
+                    const r = annotRect(view, nums);
+                    drop = replaced.some((rep) => rectOverlap(rep, r) > 0.5);
+                  }
+                }
+              }
+              if (!drop) keep.push(el);
+            }
+            target.node.set(PDFName.of("Annots"), keep);
+          }
+          const addLink = (r: Rect, url: string) => {
+            const a = view.convertToPdfPoint(r.x, r.y);
+            const b = view.convertToPdfPoint(r.x + r.w, r.y + r.h);
+            const dict = output.context.obj({
+              Type: "Annot",
+              Subtype: "Link",
+              Rect: [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])],
+              Border: [0, 0, 0],
+              A: { Type: "Action", S: "URI", URI: PDFString.of(url) },
+            });
+            target.node.addAnnot(output.context.register(dict));
+          };
+          for (const l of linkItems) if (l.url) addLink({ x: l.x, y: l.y, w: l.width, h: l.height }, l.url);
+          for (const t of linkedText) addLink(itemRect(t), t.href!);
+        }
       }
       const bytes = await output.save();
       const blob = new Blob([new Uint8Array(bytes).buffer], {
@@ -2632,6 +2784,24 @@ export default function App() {
                       }
                     />
                   </div>
+                  {isText && bound && (
+                    <div className="tool-pop-row">
+                      <span className="tool-pop-label">Link</span>
+                      <input
+                        className="tool-pop-text plain"
+                        type="url"
+                        value={bound.href ?? ""}
+                        placeholder="https://…"
+                        spellCheck={false}
+                        aria-label="Link URL"
+                        onChange={(event) => updateItem(bound.id, { href: event.target.value || undefined }, false)}
+                        onBlur={(event) => {
+                          const v = event.target.value.trim();
+                          updateItem(bound.id, { href: v ? (/^[a-z]+:/i.test(v) ? v : `https://${v}`) : undefined });
+                        }}
+                      />
+                    </div>
+                  )}
                   {isText && (
                     <div className="tool-pop-row">
                       <span className="tool-pop-label">Style</span>
@@ -2979,6 +3149,86 @@ export default function App() {
               }}
             />
 
+            {tool === "edit" && viewport && !cropRect &&
+              visibleLinks().map((l, i) => (
+                <div
+                  key={i}
+                  className="link-box"
+                  style={{
+                    left: pct(l.rect.x, viewport.width),
+                    top: pct(l.rect.y, viewport.height),
+                    width: pct(l.rect.w, viewport.width),
+                    height: pct(l.rect.h, viewport.height),
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="link-chip"
+                    title={l.url || "Link inside the document"}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={() => setLinkEdit({ rect: l.rect, url: l.url, target: l.target })}
+                  >
+                    <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.5 1.5M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7L12 19" />
+                    </svg>
+                    {l.url ? linkLabel(l.url) : "internal link"}
+                  </button>
+                </div>
+              ))}
+            {viewport && linkEdit && (
+              <div
+                className="floatbar link-editor"
+                role="dialog"
+                aria-label="Edit link"
+                style={{
+                  left: pct(linkEdit.rect.x, viewport.width),
+                  top: `calc(${pct(linkEdit.rect.y + linkEdit.rect.h, viewport.height)} + 8px)`,
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <input
+                  type="url"
+                  className="link-input"
+                  value={linkEdit.url}
+                  placeholder="https://example.com"
+                  aria-label="Link URL"
+                  autoFocus
+                  spellCheck={false}
+                  onChange={(event) => setLinkEdit({ ...linkEdit, url: event.target.value })}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      const v = linkEdit.url.trim();
+                      applyLinkEdit(v && !/^[a-z]+:/i.test(v) ? `https://${v}` : v);
+                    }
+                  }}
+                />
+                {linkEdit.url && /^https?:/i.test(linkEdit.url) && (
+                  <a className="icon" href={linkEdit.url} target="_blank" rel="noreferrer noopener" title="Open link" aria-label="Open link">
+                    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />
+                    </svg>
+                  </a>
+                )}
+                <span className="sep" />
+                {linkEdit.target.kind !== "new" && (
+                  <button className="icon danger" title="Remove link" aria-label="Remove link" onClick={() => applyLinkEdit("")}>
+                    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" />
+                    </svg>
+                  </button>
+                )}
+                <button onClick={() => setLinkEdit(null)}>Cancel</button>
+                <button
+                  className="primary"
+                  onClick={() => {
+                    const v = linkEdit.url.trim();
+                    applyLinkEdit(v && !/^[a-z]+:/i.test(v) ? `https://${v}` : v);
+                  }}
+                >
+                  {linkEdit.target.kind === "new" ? "Add link" : "Save"}
+                </button>
+              </div>
+            )}
             {tool === "edit" && hoverRegion && viewport && !cropRect && (
               <div
                 className="edit-hover"
@@ -3176,6 +3426,19 @@ export default function App() {
         {pdf && (
           <div className="pages">
             <button
+              aria-label="First page"
+              title="First page"
+              disabled={busy || pageNumber <= 1}
+              onClick={() => {
+                finishEditing();
+                setPageNumber(1);
+              }}
+            >
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path fill="currentColor" d="M18.41 7.41 17 6l-6 6 6 6 1.41-1.41L13.83 12zM7 6h2v12H7z" />
+              </svg>
+            </button>
+            <button
               aria-label="Previous page"
               disabled={busy || pageNumber <= 1}
               onClick={() => setPageNumber((n) => n - 1)}
@@ -3194,6 +3457,19 @@ export default function App() {
             >
               <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
                 <path fill="currentColor" d="M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z" />
+              </svg>
+            </button>
+            <button
+              aria-label="Last page"
+              title="Last page"
+              disabled={busy || pageNumber >= pdf.numPages}
+              onClick={() => {
+                finishEditing();
+                setPageNumber(pdf.numPages);
+              }}
+            >
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path fill="currentColor" d="M5.59 7.41 7 6l6 6-6 6-1.41-1.41L10.17 12zM15 6h2v12h-2z" />
               </svg>
             </button>
           </div>
