@@ -1214,6 +1214,23 @@ kbd {
   padding: 0 16px;
   border-top: 1px solid #17203314;
 }
+.bottombar-left {
+  position: absolute;
+  left: 70px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  color: #64748b;
+  font-size: 12px;
+  text-decoration: none;
+  transition: background 0.12s, color 0.12s;
+}
+.bottombar-left:hover {
+  background: #1720330f;
+  color: #172033;
+}
 .bottombar-right {
   position: absolute;
   right: 12px;
@@ -1510,6 +1527,7 @@ kbd {
   .tabs {
     margin: 0 8px;
   }
+  .bottombar-left span,
   .pill,
   .zoomctl,
   .bottombar .status {

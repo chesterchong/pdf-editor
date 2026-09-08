@@ -88,9 +88,12 @@ type Cover = {
   width: number;
   height: number;
   color: string;
-  /** Original content to delete from the page on export; the cover is only
-   * painted if that deletion could not be done. */
+  /** Original content this cover stands in for. While it is set, the live
+   * document is rebuilt with that content deleted. */
   removal?: Removal;
+  /** True once the original has really been deleted from the document; the
+   * cover is then never painted. */
+  stripped?: boolean;
 };
 type Item = Stroke | Highlight | TextItem | ImageItem | Cover;
 
@@ -465,21 +468,41 @@ function buildLines(raw: unknown[], view: PageViewport, fontOf: (name: string) =
       rows.push(current);
     }
   }
-  return rows.map(({ line, pieces: ps }) => {
+  // A visual row can hold several columns or table cells. Split it wherever the
+  // horizontal gap is far wider than a word space, so each cell is its own line.
+  const lines: Line[] = [];
+  for (const { line, pieces: ps } of rows) {
     ps.sort((p, q) => p.box.x - q.box.x);
-    const size = (line.y1 - line.y0) / 1.12;
-    let text = "";
+    const rowSize = (line.y1 - line.y0) / 1.12;
+    const groups: Piece[][] = [];
     let cursor = -Infinity;
     for (const p of ps) {
       const gap = p.box.x - cursor;
-      if (text && gap > size * 0.15 && !text.endsWith(" ") && !p.str.startsWith(" ")) text += " ";
-      text += p.str;
-      cursor = p.box.x + p.box.w;
+      if (!groups.length || gap > Math.max(rowSize * 1.6, 10)) groups.push([p]);
+      else groups[groups.length - 1].push(p);
+      cursor = Math.max(cursor, p.box.x + p.box.w);
     }
-    const dominant = ps.reduce((best, p) => (p.str.length > best.str.length ? p : best), ps[0]);
-    text = text.replace(/\s+/g, " ").trim();
-    return { ...line, text, size, font: dominant.font.family, bold: dominant.font.bold, italic: dominant.font.italic };
-  });
+    for (const g of groups) {
+      const x0 = Math.min(...g.map((p) => p.box.x));
+      const x1 = Math.max(...g.map((p) => p.box.x + p.box.w));
+      const y0 = Math.min(...g.map((p) => p.box.y));
+      const y1 = Math.max(...g.map((p) => p.box.y + p.box.h));
+      const size = (y1 - y0) / 1.12;
+      let text = "";
+      let end = -Infinity;
+      for (const p of g) {
+        const gap = p.box.x - end;
+        if (text && gap > size * 0.15 && !text.endsWith(" ") && !p.str.startsWith(" ")) text += " ";
+        text += p.str;
+        end = Math.max(end, p.box.x + p.box.w);
+      }
+      const dominant = g.reduce((best, p) => (p.str.length > best.str.length ? p : best), g[0]);
+      text = text.replace(/\s+/g, " ").trim();
+      if (!text) continue;
+      lines.push({ x0, x1, y0, y1, text, size, font: dominant.font.family, bold: dominant.font.bold, italic: dominant.font.italic });
+    }
+  }
+  return lines;
 }
 
 /** Bounding boxes (viewport coordinates) of the images drawn on a page. */
@@ -630,11 +653,14 @@ function message(error: unknown) {
 }
 
 type Annotations = Record<number, Item[]>;
-type StructSnapshot = { pdf: PDFDocumentProxy; source: Uint8Array; annotations: Annotations };
+type StructSnapshot = { pdf: PDFDocumentProxy; source: Uint8Array; baseSource: Uint8Array; annotations: Annotations };
 /** Everything that belongs to one open file; swapped in and out when tabs change. */
 type DocState = {
   pdf: PDFDocumentProxy;
+  /** Bytes currently shown and exported (lifted originals already deleted). */
   source: Uint8Array;
+  /** Bytes with nothing deleted; live removals are re-applied from here. */
+  baseSource: Uint8Array;
   exportName: string;
   annotations: Annotations;
   history: Record<number, Item[][]>;
@@ -662,7 +688,7 @@ function tabStyle(tone: number): CSSProperties {
 }
 
 function freshDocState(pdf: PDFDocumentProxy, source: Uint8Array, exportName: string, annotations: Annotations = {}): DocState {
-  return { pdf, source, exportName, annotations, history: {}, future: {}, structHistory: [], pageNumber: 1, zoom: 1, watermark: null };
+  return { pdf, source, baseSource: source, exportName, annotations, history: {}, future: {}, structHistory: [], pageNumber: 1, zoom: 1, watermark: null };
 }
 
 /** Move items to where they land after the page turns `delta` degrees clockwise.
@@ -772,6 +798,13 @@ export default function App() {
   // OCR results per page of the active file; cleared when the file or its pages change.
   const ocrCache = useRef<Record<number, Line[]>>({});
   const [watermark, setWatermark] = useState<Watermark | null>(null);
+  const [baseSource, setBaseSource] = useState<Uint8Array | null>(null);
+  // Live removal bookkeeping: which cover set the shown document reflects, a
+  // run counter to drop stale rebuilds, and a flag so the page re-render that
+  // follows a rebuild keeps the current selection.
+  const removalKey = useRef("");
+  const removalRun = useRef(0);
+  const keepSelection = useRef(false);
   const [wmOpen, setWmOpen] = useState(false);
   const wmRoot = useRef<HTMLDivElement>(null);
   const [font, setFont] = useState("Arial");
@@ -886,8 +919,11 @@ export default function App() {
     setTextLines([]);
     drag.current = null;
     setDraft(null);
-    setSelectedId(null);
-    setEditingId(null);
+    if (keepSelection.current) keepSelection.current = false;
+    else {
+      setSelectedId(null);
+      setEditingId(null);
+    }
     async function renderPage() {
       try {
         const page = await pdf!.getPage(pageNumber);
@@ -1007,11 +1043,69 @@ export default function App() {
     setCropRect({ x: inset, y: inset, w: viewport.width - inset * 2, h: viewport.height - inset * 2 });
   }, [cropPending, viewport]);
 
+  // Live removal: rebuild the shown document from the untouched base with every
+  // lifted original deleted, whenever the set of lifted originals changes.
+  // Undo, redo, delete and Clear all therefore bring originals back for free.
+  useEffect(() => {
+    if (!pdf || !baseSource) return;
+    const pending: { page: number; id: string; removal: Removal }[] = [];
+    for (const [key, list] of Object.entries(annotations)) {
+      for (const it of list) if (it.kind === "cover" && it.removal) pending.push({ page: Number(key), id: it.id, removal: it.removal });
+    }
+    const key = pending.map((p) => `${p.page}:${p.id}`).sort().join("|");
+    if (key === removalKey.current) return;
+    removalKey.current = key;
+    const run = ++removalRun.current;
+    const currentPdf = pdf;
+    (async () => {
+      let nextBytes = baseSource;
+      const strippedIds = new Set<string>();
+      if (pending.length) {
+        const doc = await PDFDocument.load(baseSource.slice());
+        const pages = [...new Set(pending.map((p) => p.page))];
+        for (const page of pages) {
+          const onPage = pending.filter((p) => p.page === page);
+          const view = (await currentPdf.getPage(page)).getViewport({ scale: 1.25 });
+          const ok = stripFromPage(doc, page - 1, view, onPage.map((p) => p.removal));
+          onPage.forEach((p, k) => {
+            if (ok[k]) strippedIds.add(p.id);
+          });
+        }
+        nextBytes = strippedIds.size ? await doc.save() : baseSource;
+      }
+      if (run !== removalRun.current) return;
+      const nextPdf = nextBytes === baseSource && source === baseSource ? currentPdf : await getDocument({ data: nextBytes.slice() }).promise;
+      if (run !== removalRun.current) return;
+      // Record which covers no longer need painting (no history entry).
+      setAnnotations((current) => {
+        let changed = false;
+        const next: Annotations = {};
+        for (const [k, list] of Object.entries(current)) {
+          next[Number(k)] = list.map((it) => {
+            if (it.kind !== "cover") return it;
+            const stripped = it.removal ? strippedIds.has(it.id) : !!it.stripped;
+            if (stripped === !!it.stripped) return it;
+            changed = true;
+            return { ...it, stripped };
+          });
+        }
+        return changed ? next : current;
+      });
+      if (nextPdf !== currentPdf) {
+        keepSelection.current = true;
+        setSource(nextBytes);
+        setPdf(nextPdf);
+      }
+    })().catch((error) => setStatus(`Could not update page content: ${message(error)}`));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [annotations, baseSource]);
+
   // Paint annotations; repaint once any web fonts finish loading.
   useEffect(() => {
     if (!viewport || !overlayCanvas.current) return;
     const canvas = overlayCanvas.current;
-    const all = draft ? [...items, draft] : items;
+    const visible = items.filter((i) => !(i.kind === "cover" && i.stripped));
+    const all = draft ? [...visible, draft] : visible;
     if (highlightCanvas.current) paint(highlightCanvas.current, viewport, all, editingId, "highlights", watermark);
     paint(canvas, viewport, all, editingId, "marks");
     const fonts = all.filter((i): i is TextItem => i.kind === "text");
@@ -1316,6 +1410,7 @@ export default function App() {
     return {
       pdf: pdf!,
       source: source!,
+      baseSource: baseSource ?? source!,
       exportName: filename,
       annotations: itemsRef.current,
       history: history.current,
@@ -1330,6 +1425,8 @@ export default function App() {
   function loadState(state: DocState) {
     setPdf(state.pdf);
     setSource(state.source);
+    setBaseSource(state.baseSource);
+    removalKey.current = "";
     setFilename(state.exportName);
     setAnnotations(state.annotations);
     history.current = state.history;
@@ -1380,6 +1477,8 @@ export default function App() {
     } else {
       setPdf(null);
       setSource(null);
+      setBaseSource(null);
+      removalKey.current = "";
       setAnnotations({});
       history.current = {};
       future.current = {};
@@ -1425,11 +1524,24 @@ export default function App() {
     setBusy(true);
     try {
       const nextPdf = await getDocument({ data: nextBytes.slice() }).promise;
-      structHistory.current = [...structHistory.current.slice(-9), { pdf, source, annotations: itemsRef.current }];
+      structHistory.current = [
+        ...structHistory.current.slice(-9),
+        { pdf, source, baseSource: baseSource ?? source, annotations: itemsRef.current },
+      ];
       finishEditing();
+      // The rebuilt file already has lifted originals deleted; it becomes the
+      // new base, and its covers are baked (no longer re-applied or painted).
+      const baked: Annotations = {};
+      for (const [k, list] of Object.entries(nextAnnotations)) {
+        baked[Number(k)] = list.map((it) =>
+          it.kind === "cover" && it.removal ? { ...it, removal: undefined, stripped: it.stripped ?? true } : it,
+        );
+      }
+      setBaseSource(nextBytes);
+      removalKey.current = "";
       setSource(nextBytes);
       setPdf(nextPdf);
-      setAnnotations(nextAnnotations);
+      setAnnotations(baked);
       // Per-page item history no longer lines up with the pages; start fresh.
       history.current = {};
       future.current = {};
@@ -1448,6 +1560,8 @@ export default function App() {
   function undoStructure() {
     const snap = structHistory.current.pop();
     if (!snap) return;
+    setBaseSource(snap.baseSource);
+    removalKey.current = "";
     setSource(snap.source);
     setPdf(snap.pdf);
     setAnnotations(snap.annotations);
@@ -2083,16 +2197,9 @@ export default function App() {
         const view = originalPage.getViewport({ scale: 1.25 });
         const target = output.getPage(index - 1);
 
-        // Tier 2: delete the original text/images that were lifted. Covers whose
-        // originals could be deleted are not painted.
-        const covers = drawable.filter((i): i is Cover => i.kind === "cover" && !!i.removal);
-        const stripped = new Set<string>();
-        if (covers.length) {
-          const ok = stripFromPage(output, index - 1, view, covers.map((c) => c.removal!));
-          covers.forEach((c, k) => {
-            if (ok[k]) stripped.add(c.id);
-          });
-        }
+        // Lifted originals were already deleted from `source` by the live
+        // rebuild; covers that succeeded are never painted.
+        const stripped = new Set(drawable.filter((i): i is Cover => i.kind === "cover" && !!i.stripped).map((c) => c.id));
 
         // Map the visible overlay back into PDF coordinates.
         // This also accounts for rotated pages and crop-box offsets.
@@ -3053,6 +3160,19 @@ export default function App() {
       </section>
 
       <nav className="bottombar" aria-label="Page navigation">
+        <a
+          className="bottombar-left"
+          href="https://github.com/chesterchong/pdf-editor"
+          target="_blank"
+          rel="noreferrer noopener"
+          title="Source code on GitHub"
+          aria-label="Source code on GitHub"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor">
+            <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2.17c-3.2.7-3.87-1.36-3.87-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.76 2.69 1.25 3.35.96.1-.75.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.78 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.8 1.19 1.83 1.19 3.09 0 4.42-2.7 5.39-5.26 5.68.41.35.78 1.05.78 2.12v3.14c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5z" />
+          </svg>
+          <span>Open source</span>
+        </a>
         {pdf && (
           <div className="pages">
             <button

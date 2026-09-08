@@ -1,20 +1,36 @@
 # PDF Studio
 
-Browser-based PDF editor for confidential documents. **Your PDF never leaves your computer.**
+A PDF editor that runs entirely in your browser. Open, annotate, sign, edit, reorganise and export PDFs. Nothing you open is uploaded anywhere.
 
-## Privacy
+Live: https://pdf-editor-three-nu.vercel.app
 
-All processing happens inside the browser tab: PDF rendering (pdf.js), editing, and export (pdf-lib) run locally. There is no backend, no upload, no analytics, and no third-party font or script loading. Signature fonts are bundled with the app.
+## What it does
 
-The production deployment enforces this with a `Content-Security-Policy` header (`connect-src 'none'`), so the page cannot make network requests after it loads. You can go offline and keep working.
+- Text boxes, signatures, freehand drawing, highlights and images
+- Edit existing page content: lift text or images, retype, move, or remove them
+- OCR for scanned pages, running on your device
+- Rotate, crop, reorder, remove, extract and combine pages
+- Watermarks
+- Export as a real PDF with selectable text
 
-## Features
+## Privacy, and how to check it yourself
 
-- **Text boxes**: click to place, type inline. Move by dragging, scale from a corner, reflow from a side. Font family, size, color, bold, italic, underline, strikethrough.
-- **Images**: place, move, and resize from the corners (aspect ratio kept).
-- **Signatures**: type your name and pick a script style, or draw by hand. Signatures are movable and resizable.
-- **Highlights**: drag across text and the highlight snaps to the text lines.
-- **Freehand drawing**, multi-page navigation, undo, and local save (File System Access API with a download fallback).
+The app is a static site. There is no server-side code and no account. Your files stay in the browser tab.
+
+You can verify this in a few minutes:
+
+1. **Watch the network.** Open the site, open your browser's developer tools and switch to the Network tab. Load a PDF, annotate it and export it. You will see no requests while you work. The only later requests are the app fetching its own font or OCR engine files from the same origin, never sending anything out.
+2. **Go offline.** Load the page once, then turn off your connection. Everything keeps working, including export.
+3. **Read the source.** This repository is the complete source of the deployed site. Search it for `fetch(` and you will find only same-origin loads of font and OCR files. There are no analytics, trackers or third-party scripts.
+4. **Build it yourself.** The deployed site is built from this repository on every push to `main`. You can build the same thing locally:
+
+   ```bash
+   npm install
+   npm run build
+   npm run preview
+   ```
+
+   `npm install` also copies the OCR engine into `public/ocr` from the `tesseract.js` packages, so the app never loads it from a third-party CDN.
 
 ## Develop
 
@@ -23,10 +39,8 @@ npm install
 npm run dev
 ```
 
-## Build
+Built with React, Vite, [pdf.js](https://mozilla.github.io/pdf.js/), [pdf-lib](https://pdf-lib.js.org/) and [tesseract.js](https://tesseract.projectnaptha.com/).
 
-```bash
-npm run build
-```
+## License
 
-Output is in `dist/`. Deploys as a static Vite site (framework: Vite, build `npm run build`, output `dist`).
+MIT
