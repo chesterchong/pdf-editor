@@ -1361,12 +1361,6 @@ export default function App() {
           requests after it loads. You can disconnect from the internet and
           keep working. Edits are kept in memory only until you save a copy.
         </p>
-        <p>
-          Text: click to place a box and type; drag it to move, drag a corner to
-          scale, drag a side to reflow. Double-click a box to edit it. Images:
-          drag to move, drag a corner to resize. Highlight: drag across text and
-          it snaps to the lines. Delete or Backspace removes the selection.
-        </p>
       </footer>
     </main>
   );
