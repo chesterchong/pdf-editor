@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import type {
+  DragEvent as ReactDragEvent,
+  PointerEvent as ReactPointerEvent,
+} from "react";
 import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
 import type { PDFDocumentProxy, PageViewport } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
@@ -427,6 +430,7 @@ export default function App() {
   const overlayCanvas = useRef<HTMLCanvasElement>(null);
   const pageBox = useRef<HTMLDivElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
   const drag = useRef<Drag | null>(null);
   const itemsRef = useRef<Record<number, Item[]>>({});
   const history = useRef<Record<number, Item[][]>>({});
@@ -531,6 +535,49 @@ export default function App() {
     );
     return () => window.clearTimeout(id);
   }, [editingId]);
+
+  // Paste a PDF (or an image, once a PDF is open) from the clipboard.
+  useEffect(() => {
+    function onPaste(event: ClipboardEvent) {
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
+        return;
+      }
+      const files = Array.from(event.clipboardData?.files ?? []);
+      const pdfFile = files.find(
+        (f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name),
+      );
+      if (pdfFile) {
+        event.preventDefault();
+        void openPdf(pdfFile);
+        return;
+      }
+      const imageFile = files.find((f) => f.type.startsWith("image/"));
+      if (imageFile && pdf) {
+        event.preventDefault();
+        void openImage(imageFile);
+      } else if (files.length && !pdf) {
+        setStatus("That is not a PDF. Paste or open a PDF file to get started.");
+      }
+    }
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  });
+
+  function onDrop(event: ReactDragEvent) {
+    event.preventDefault();
+    const files = Array.from(event.dataTransfer.files);
+    const pdfFile = files.find(
+      (f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name),
+    );
+    if (pdfFile) {
+      void openPdf(pdfFile);
+      return;
+    }
+    const imageFile = files.find((f) => f.type.startsWith("image/"));
+    if (imageFile && pdf) void openImage(imageFile);
+    else if (files.length) setStatus("Drop a PDF file to open it.");
+  }
 
   // Keyboard: delete the selection, escape to deselect.
   useEffect(() => {
@@ -1026,7 +1073,7 @@ export default function App() {
   };
 
   return (
-    <main>
+    <main onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
       <header>
         <div>
           <h1>PDF Studio</h1>
@@ -1041,20 +1088,19 @@ export default function App() {
         </button>
       </header>
 
+      <input
+        ref={fileInput}
+        type="file"
+        accept=".pdf,application/pdf"
+        hidden
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) void openPdf(file);
+          event.target.value = "";
+        }}
+      />
+
       <section className="toolbar" aria-label="PDF editing tools">
-        <label className="file-button">
-          Open PDF
-          <input
-            type="file"
-            accept=".pdf,application/pdf"
-            disabled={busy}
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) void openPdf(file);
-              event.target.value = "";
-            }}
-          />
-        </label>
         <div className="tools">
           {(Object.keys(toolLabels) as Tool[]).map((value) => (
             <button
@@ -1251,6 +1297,13 @@ export default function App() {
             >
               Next
             </button>
+            <button
+              className="link"
+              disabled={busy}
+              onClick={() => fileInput.current?.click()}
+            >
+              Open another PDF
+            </button>
           </nav>
           <section className="workspace">
             <div
@@ -1345,9 +1398,25 @@ export default function App() {
           </section>
         </>
       ) : (
-        <section className="empty">
+        <section
+          className="empty"
+          role="button"
+          tabIndex={0}
+          aria-label="Open a PDF"
+          onClick={() => fileInput.current?.click()}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              fileInput.current?.click();
+            }
+          }}
+        >
           <h2>Your PDF, your workspace</h2>
-          <p>Open a PDF, annotate it, then save a copy locally.</p>
+          <p className="cta">Click here to open a PDF</p>
+          <p>
+            or drop a file onto this page, or paste it with{" "}
+            <kbd>Ctrl</kbd>+<kbd>V</kbd> / <kbd>⌘</kbd>+<kbd>V</kbd>.
+          </p>
           <p>No account, no upload, no server. Everything runs in this browser tab.</p>
         </section>
       )}

@@ -316,3 +316,39 @@ footer .privacy {
   background: #eef4ff;
   color: #1e3a8a;
 }
+
+/* Empty state acts as the open target */
+.empty {
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.empty:hover,
+.empty:focus-visible {
+  border-color: #2563eb;
+  background: #f5f8ff;
+  outline: none;
+}
+.empty .cta {
+  color: #1d4ed8;
+  font-size: 18px;
+  font-weight: 600;
+}
+.empty kbd {
+  padding: 1px 6px;
+  border: 1px solid #cbd5e1;
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: #f8fafc;
+  color: #334155;
+  font: inherit;
+  font-size: 12px;
+}
+button.link {
+  border-color: transparent;
+  background: transparent;
+  color: #2563eb;
+  text-transform: none;
+}
+button.link:hover:not(:disabled) {
+  background: #eaf0ff;
+}
