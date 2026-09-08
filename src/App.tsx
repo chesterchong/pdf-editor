@@ -2176,7 +2176,7 @@ export default function App() {
 
             {viewport && selected && selectedRect && !editing && (
               <div
-                className="selection"
+                className={`selection ${selected.kind === "text" && selected.signature ? "signature" : ""}`}
                 style={{
                   left: pct(selectedRect.x, viewport.width),
                   top: pct(selectedRect.y, viewport.height),
@@ -2184,7 +2184,9 @@ export default function App() {
                   height: pct(selectedRect.h, viewport.height),
                 }}
               >
-                {(selected.kind === "image"
+                {(selected.kind === "text" && selected.signature
+                  ? ([] as Handle[])
+                  : selected.kind === "image"
                   ? (["nw", "ne", "sw", "se"] as Handle[])
                   : (["nw", "ne", "sw", "se", "e", "w"] as Handle[])
                 ).map((h) => (
