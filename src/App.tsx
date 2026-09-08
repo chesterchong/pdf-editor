@@ -2194,11 +2194,11 @@ export default function App() {
                   height: pct(selectedRect.h, viewport.height),
                 }}
               >
-                {(selected.kind === "text" && selected.signature
-                  ? (["se"] as Handle[])
-                  : selected.kind === "image"
-                  ? (["nw", "ne", "sw", "se"] as Handle[])
-                  : (["nw", "ne", "sw", "se", "e", "w"] as Handle[])
+                {/* One visible dot (bottom right) scales the item. Plain text
+                    boxes also keep invisible side strips to change wrapping width. */}
+                {(selected.kind === "text" && !selected.signature
+                  ? (["se", "e", "w"] as Handle[])
+                  : (["se"] as Handle[])
                 ).map((h) => (
                   <div
                     key={h}

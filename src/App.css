@@ -1159,8 +1159,8 @@ kbd {
 .handle.ne { left: calc(100% + 5px); top: -5px; cursor: nesw-resize; }
 .handle.sw { left: -5px; top: calc(100% + 5px); cursor: nesw-resize; }
 .handle.se { left: calc(100% + 5px); top: calc(100% + 5px); cursor: nwse-resize; }
-/* Side edges: a full-height drag strip that changes width only, with a small
-   pill at the midpoint so the affordance is visible. */
+/* Side edges of a text box: invisible full-height strips that change the
+   wrapping width. No visible handle, just the resize cursor. */
 .handle.e,
 .handle.w {
   top: 0;
@@ -1171,24 +1171,6 @@ kbd {
 }
 .handle.e { left: calc(100% + 5px); }
 .handle.w { left: -5px; }
-.handle.e::after,
-.handle.w::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 3px;
-  height: 14px;
-  border-radius: 2px;
-  background: #2563eb;
-  box-shadow: 0 0 0 1.5px white;
-  transform: translate(-50%, -50%);
-  transition: transform 0.1s;
-}
-.handle.e:hover::after,
-.handle.w:hover::after {
-  transform: translate(-50%, -50%) scale(1.2, 1.15);
-}
 
 /* Frosted-glass surface shared by the floating toolbar and popovers. */
 .floatbar,
