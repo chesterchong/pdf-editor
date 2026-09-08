@@ -117,11 +117,8 @@ export function ColorPicker({ value, defaultValue, onChange, label }: Props) {
               title="Add custom color"
               onClick={() => native.current?.click()}
             >
-              <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
-                <path
-                  fill="currentColor"
-                  d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm1-13h-2v4H7v2h4v4h2v-4h4v-2h-4V7z"
-                />
+              <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <path d="M12 5v14M5 12h14" />
               </svg>
             </button>
             {eyeDropper && (
