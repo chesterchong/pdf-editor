@@ -898,6 +898,21 @@ export default function App() {
         }
       }
       if (typing) return;
+      // Left/Right arrows flip pages (unless a box is being edited).
+      if (!mod && !event.altKey && pdf && !busy && !editingId && !cropRect) {
+        if (event.key === "ArrowLeft" && pageNumber > 1) {
+          event.preventDefault();
+          finishEditing();
+          setPageNumber((n) => Math.max(1, n - 1));
+          return;
+        }
+        if (event.key === "ArrowRight" && pageNumber < pdf.numPages) {
+          event.preventDefault();
+          finishEditing();
+          setPageNumber((n) => Math.min(pdf.numPages, n + 1));
+          return;
+        }
+      }
       if (!mod && !event.altKey && pdf && !busy) {
         const byKey: Record<string, Tool> = {
           v: "select",
@@ -2039,15 +2054,21 @@ export default function App() {
             style={{ width: (viewport?.width || 800) * zoom }}
           >
             {viewport && !cropRect &&
-              // Following pages fan out behind the current sheet; click one to jump to it.
-              Array.from({ length: Math.min(3, pdf.numPages - pageNumber) }, (_, i) => pageNumber + 1 + i)
-                .reverse()
-                .map((n) => (
+              // Neighbouring pages fan out behind the current sheet: previous
+              // pages to the left, following pages to the right. Deeper sheets
+              // render first so nearer ones paint on top. Click one to jump.
+              [-1, 1]
+                .flatMap((side) =>
+                  Array.from({ length: 3 }, (_, i) => ({ n: pageNumber + side * (i + 1), depth: i + 1, side })),
+                )
+                .filter(({ n }) => n >= 1 && n <= pdf.numPages)
+                .sort((a, b) => b.depth - a.depth)
+                .map(({ n, depth, side }) => (
                   <button
                     key={n}
                     type="button"
                     className="sheet"
-                    style={{ "--depth": n - pageNumber } as CSSProperties}
+                    style={{ "--depth": depth, "--side": side } as CSSProperties}
                     title={`Go to page ${n}`}
                     aria-label={`Go to page ${n}`}
                     disabled={busy}

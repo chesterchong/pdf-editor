@@ -568,7 +568,8 @@ button.link:hover:not(:disabled) {
   position: relative;
   overflow: auto;
   /* Clear the floating top bar, rail and bottom bar. */
-  padding: 80px 72px 118px 84px;
+  /* 84px fan on both sides and below (3 sheets × 28px) beyond the bars. */
+  padding: 80px 112px 158px 168px;
   background: #e6eaf2;
 }
 .page {
@@ -583,31 +584,35 @@ button.link:hover:not(:disabled) {
 .page.zoomed {
   max-width: none;
 }
-/* Following pages, fanned out behind the current one. Only the offset edge
-   shows; it is a button that jumps to that page. */
+/* Neighbouring pages fanned out behind the current one: previous pages step
+   left, following pages step right (--side is -1 or 1). Only the offset edge
+   shows; it is a button that jumps to that page. Greyed at rest, the border
+   lights up on hover. */
 .sheet {
+  --step: 28px;
   position: absolute;
   inset: 0;
   z-index: -1;
   min-height: 0;
   padding: 0;
   border: none;
-  border-radius: 2px;
+  border-radius: 3px;
   background: white;
-  box-shadow: 0 1px 3px #17203326, 0 10px 30px -14px #17203352;
-  transform: translate(calc(var(--depth) * 14px), calc(var(--depth) * 14px));
-  filter: brightness(calc(1 - var(--depth) * 0.035));
+  box-shadow: 0 0 0 1px #17203314, 0 1px 3px #17203326, 0 12px 32px -16px #17203352;
+  transform: translate(calc(var(--side) * var(--depth) * var(--step)), calc(var(--depth) * var(--step)));
+  filter: grayscale(1) brightness(calc(0.97 - var(--depth) * 0.03));
   cursor: pointer;
-  transition: transform 0.16s cubic-bezier(0.2, 0.8, 0.2, 1), filter 0.16s;
+  transition: transform 0.16s cubic-bezier(0.2, 0.8, 0.2, 1), filter 0.16s, box-shadow 0.16s;
 }
 .sheet:hover:not(:disabled) {
   background: white;
-  transform: translate(calc(var(--depth) * 14px + 12px), calc(var(--depth) * 14px));
+  transform: translate(calc(var(--side) * (var(--depth) * var(--step) + 10px)), calc(var(--depth) * var(--step)));
   filter: none;
+  box-shadow: 0 0 0 2px #2563eb, 0 0 0 6px #2563eb26, 0 12px 32px -12px #17203366;
 }
 .sheet:focus-visible {
-  outline: 2px solid #93b4ff;
-  outline-offset: 2px;
+  outline: none;
+  box-shadow: 0 0 0 2px #2563eb, 0 0 0 6px #2563eb26;
 }
 .sheet .thumb {
   display: block;
