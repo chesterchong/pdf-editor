@@ -100,10 +100,9 @@ function exportFilename(raw: string): string {
 
 const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl+";
 
-/** Tools that expose colour and size options in a fly-out panel. */
+/** Tools with a colour/size fly-out. Text and Signature are excluded: their
+ * floating toolbar already covers font, size and colour once a box exists. */
 const TOOL_OPTIONS: Partial<Record<Tool, { sizeLabel: string; min: number; max: number }>> = {
-  text: { sizeLabel: "Font size", min: 6, max: 72 },
-  sign: { sizeLabel: "Size", min: 6, max: 72 },
   draw: { sizeLabel: "Thickness", min: 6, max: 72 },
   highlight: { sizeLabel: "Height", min: 6, max: 72 },
 };
