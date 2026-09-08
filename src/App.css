@@ -48,6 +48,38 @@ body {
   align-items: center;
   gap: 14px;
 }
+.filename {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 10px 0 0;
+  border: 1px solid #dce2ec;
+  border-radius: 8px;
+  background: white;
+  color: #64748b;
+  font-size: 14px;
+}
+.filename:focus-within {
+  border-color: #93b4ff;
+  box-shadow: 0 0 0 2px #dbe7ff;
+}
+.filename input {
+  width: 220px;
+  min-height: 34px;
+  padding: 0 2px 0 12px;
+  border: 0;
+  background: transparent;
+  color: #172033;
+  font: inherit;
+  outline: none;
+}
+.filename input:disabled {
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+.filename:has(input:disabled) {
+  opacity: 0.6;
+}
 .pill {
   display: inline-flex;
   align-items: center;
@@ -210,6 +242,111 @@ button.link:hover:not(:disabled) {
 .rail-pop input[type="range"] {
   width: 140px;
 }
+
+/* Colour dot + options marker on tools that have a fly-out */
+.rail-btn .rail-dot {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1.5px white, inset 0 0 0 1px #0000001f;
+}
+.rail-btn.has-options::after {
+  content: "";
+  position: absolute;
+  right: 3px;
+  top: 4px;
+  border: 3px solid transparent;
+  border-right-color: #94a3b8;
+  border-top-color: #94a3b8;
+  border-radius: 1px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.rail-btn.has-options:hover::after,
+.rail-btn.has-options.active::after {
+  opacity: 1;
+}
+.rail-btn.active.has-options::after {
+  border-right-color: #1d4ed8;
+  border-top-color: #1d4ed8;
+}
+
+/* Tool options fly-out */
+.tool-pop {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  width: 268px;
+  padding: 12px 14px 14px;
+}
+.tool-pop-title {
+  color: #172033;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
+}
+.tool-pop-row {
+  display: grid;
+  grid-template-columns: 64px 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+.tool-pop-label {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 500;
+}
+.tool-pop-row input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  accent-color: #2563eb;
+}
+.quick-colors {
+  grid-column: 2 / -1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.quick-swatch {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px #00000024;
+  transition: transform 0.1s;
+}
+.quick-swatch:hover:not(:disabled) {
+  transform: scale(1.15);
+  background: inherit;
+}
+.quick-swatch.selected {
+  box-shadow: 0 0 0 2px white, 0 0 0 3.5px #2563eb;
+}
+.quick-colors .cp > .cp-trigger {
+  flex: 0 0 26px;
+  width: 26px;
+  min-height: 26px;
+  padding: 3px;
+  border-radius: 50%;
+  background: conic-gradient(#f43f5e, #f59e0b, #84cc16, #06b6d4, #6366f1, #d946ef, #f43f5e);
+  border: none;
+}
+.quick-colors .cp-trigger-swatch {
+  height: 100%;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px white;
+}
+.rail .quick-colors .cp-pop {
+  top: calc(100% + 8px);
+  right: 0;
+  left: auto;
+}
 .rail-pop input[type="number"] {
   width: 56px;
   height: 30px;
@@ -262,9 +399,13 @@ button.link:hover:not(:disabled) {
 .page {
   position: relative;
   max-width: 100%;
+  transition: width 0.08s ease-out;
   margin: 0 auto;
   background: white;
   box-shadow: 0 10px 36px #17203326, 0 1px 3px #17203320;
+}
+.page.zoomed {
+  max-width: none;
 }
 .pdf-canvas {
   display: block;
@@ -379,6 +520,31 @@ kbd {
 .bottombar .pages strong {
   color: #172033;
 }
+.zoomctl {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  transform: translateY(-50%);
+}
+.zoomctl button {
+  width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-color: transparent;
+  border-radius: 6px;
+  color: #475569;
+}
+.zoomctl .zoom-value {
+  width: auto;
+  min-width: 52px;
+  padding: 0 6px;
+  color: #172033;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
 .bottombar .pages button {
   width: 32px;
   min-height: 32px;
@@ -386,15 +552,6 @@ kbd {
   border-color: transparent;
   border-radius: 50%;
   color: #25324a;
-}
-.bottombar .link {
-  position: absolute;
-  right: 12px;
-  top: 50%;
-  min-height: 30px;
-  padding: 4px 10px;
-  font-size: 12px;
-  transform: translateY(-50%);
 }
 
 /* ---- Selection, handles, floating toolbar, inline editor ---- */
@@ -521,8 +678,11 @@ kbd {
 }
 
 @media (max-width: 640px) {
+  .filename input {
+    width: 120px;
+  }
   .pill,
-  .bottombar .link,
+  .zoomctl,
   .bottombar .status {
     display: none;
   }

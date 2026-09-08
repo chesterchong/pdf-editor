@@ -4,8 +4,8 @@ import type {
   PointerEvent as ReactPointerEvent,
   ReactNode,
 } from "react";
-import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
-import type { PDFDocumentProxy, PageViewport } from "pdfjs-dist";
+import { getDocument, GlobalWorkerOptions, RenderingCancelledException } from "pdfjs-dist";
+import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
   PDFDocument,
@@ -86,16 +86,35 @@ type Drag =
       snapshot: Item[];
     };
 
-type SaveHandle = {
-  createWritable(): Promise<{
-    write(data: Blob): Promise<void>;
-    close(): Promise<void>;
-  }>;
+/** Turn the editable name into a safe download file name ending in .pdf. */
+function exportFilename(raw: string): string {
+  const base = raw
+    .trim()
+    .replace(/\.pdf$/i, "")
+    // oxlint-disable-next-line no-control-regex
+    .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "-")
+    .replace(/^\.+/, "")
+    .trim();
+  return (base || "document") + ".pdf";
+}
+
+const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl+";
+
+/** Tools that expose colour and size options in a fly-out panel. */
+const TOOL_OPTIONS: Partial<Record<Tool, { sizeLabel: string; min: number; max: number }>> = {
+  text: { sizeLabel: "Font size", min: 6, max: 72 },
+  sign: { sizeLabel: "Size", min: 6, max: 72 },
+  draw: { sizeLabel: "Thickness", min: 6, max: 72 },
+  highlight: { sizeLabel: "Height", min: 6, max: 72 },
 };
-type SavePicker = (options: {
-  suggestedName: string;
-  types: { description: string; accept: Record<string, string[]> }[];
-}) => Promise<SaveHandle>;
+const QUICK_COLORS = ["#172033", "#1d4ed8", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#db2777", "#ffffff"];
+const QUICK_HIGHLIGHTS = ["#ffe95c", "#a7f3d0", "#bae6fd", "#fbcfe8", "#fed7aa", "#ddd6fe", "#fecaca", "#e2e8f0"];
+
+const ZOOM_MIN = 0.25;
+const ZOOM_MAX = 4;
+const ZOOM_STEP = 1.25;
+const clampZoom = (z: number) =>
+  Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 100) / 100));
 
 const FONTS = [
   "Arial",
@@ -410,7 +429,7 @@ function pct(value: number, total: number) {
 export default function App() {
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [source, setSource] = useState<Uint8Array | null>(null);
-  const [filename, setFilename] = useState("document.pdf");
+  const [filename, setFilename] = useState("document-edited");
   const [pageNumber, setPageNumber] = useState(1);
   const [viewport, setViewport] = useState<PageViewport | null>(null);
   const [textLines, setTextLines] = useState<Line[]>([]);
@@ -433,17 +452,56 @@ export default function App() {
   const pageBox = useRef<HTMLDivElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
-  const sizeRoot = useRef<HTMLDivElement>(null);
-  const [sizeOpen, setSizeOpen] = useState(false);
+  const canvasBox = useRef<HTMLElement>(null);
+  const panelRoot = useRef<HTMLDivElement>(null);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const zoomRef = useRef(1);
+  const zoomAnchor = useRef<{ x: number; y: number } | null>(null);
+  const prevZoom = useRef(1);
+  const pageProxy = useRef<PDFPageProxy | null>(null);
+  const bitmapTask = useRef<ReturnType<PDFPageProxy["render"]> | null>(null);
 
   useEffect(() => {
-    if (!sizeOpen) return;
+    if (!panelOpen) return;
     function onDown(event: PointerEvent) {
-      if (!sizeRoot.current?.contains(event.target as Node)) setSizeOpen(false);
+      if (!panelRoot.current?.contains(event.target as Node)) setPanelOpen(false);
     }
     window.addEventListener("pointerdown", onDown);
     return () => window.removeEventListener("pointerdown", onDown);
-  }, [sizeOpen]);
+  }, [panelOpen]);
+
+  /** Rasterise the page into the canvas, sharp enough for the current zoom. */
+  async function drawBitmap(
+    page: PDFPageProxy,
+    view: PageViewport,
+    canvas: HTMLCanvasElement,
+    zoomLevel: number,
+  ) {
+    bitmapTask.current?.cancel();
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const density = Math.min(6, (window.devicePixelRatio || 1) * Math.max(1, zoomLevel));
+    canvas.width = Math.ceil(view.width * density);
+    canvas.height = Math.ceil(view.height * density);
+    const task = page.render({
+      canvas,
+      canvasContext: ctx,
+      viewport: view,
+      transform: [canvas.width / view.width, 0, 0, canvas.height / view.height, 0, 0],
+    });
+    bitmapTask.current = task;
+    try {
+      await task.promise;
+    } finally {
+      if (bitmapTask.current === task) bitmapTask.current = null;
+    }
+  }
+
+  function zoomBy(factor: number, anchor: { x: number; y: number } | null = null) {
+    zoomAnchor.current = anchor;
+    setZoom((z) => clampZoom(z * factor));
+  }
   const drag = useRef<Drag | null>(null);
   const itemsRef = useRef<Record<number, Item[]>>({});
   const history = useRef<Record<number, Item[][]>>({});
@@ -459,11 +517,6 @@ export default function App() {
   useEffect(() => {
     if (!pdf) return;
     let cancelled = false;
-    let renderTask:
-      | ReturnType<
-          Awaited<ReturnType<PDFDocumentProxy["getPage"]>>["render"]
-        >
-      | undefined;
     setViewport(null);
     setTextLines([]);
     drag.current = null;
@@ -476,39 +529,69 @@ export default function App() {
         if (cancelled) return;
         const view = page.getViewport({ scale: 1.25 });
         const canvas = pageCanvas.current;
-        const ctx = canvas?.getContext("2d");
-        if (!canvas || !ctx) return;
-        const density = window.devicePixelRatio || 1;
-        canvas.width = Math.ceil(view.width * density);
-        canvas.height = Math.ceil(view.height * density);
-        renderTask = page.render({
-          canvas,
-          canvasContext: ctx,
-          viewport: view,
-          transform: [
-            canvas.width / view.width,
-            0,
-            0,
-            canvas.height / view.height,
-            0,
-            0,
-          ],
-        });
-        await renderTask.promise;
+        if (!canvas) return;
+        pageProxy.current = page;
+        await drawBitmap(page, view, canvas, zoomRef.current);
         if (cancelled) return;
         setViewport(view);
         const content = await page.getTextContent();
         if (!cancelled) setTextLines(buildLines(content.items, view));
       } catch (error) {
-        if (!cancelled) setStatus(`Preview error: ${message(error)}`);
+        if (cancelled || error instanceof RenderingCancelledException) return;
+        setStatus(`Preview error: ${message(error)}`);
       }
     }
     void renderPage();
     return () => {
       cancelled = true;
-      renderTask?.cancel();
+      bitmapTask.current?.cancel();
     };
   }, [pdf, pageNumber]);
+
+  // Re-rasterise at the new zoom (debounced) so the page stays crisp, and keep
+  // the point under the cursor (or the centre of the view) fixed while zooming.
+  useEffect(() => {
+    const box = canvasBox.current;
+    const from = prevZoom.current;
+    prevZoom.current = zoom;
+    zoomRef.current = zoom;
+    if (box && from !== zoom) {
+      const rect = box.getBoundingClientRect();
+      const anchor = zoomAnchor.current ?? { x: rect.width / 2, y: rect.height / 2 };
+      const ratio = zoom / from;
+      box.scrollLeft = (box.scrollLeft + anchor.x) * ratio - anchor.x;
+      box.scrollTop = (box.scrollTop + anchor.y) * ratio - anchor.y;
+    }
+    zoomAnchor.current = null;
+    const page = pageProxy.current;
+    const canvas = pageCanvas.current;
+    if (!page || !canvas || !viewport) return;
+    const id = window.setTimeout(() => {
+      drawBitmap(page, viewport, canvas, zoom).catch(() => undefined);
+    }, 150);
+    return () => window.clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [zoom]);
+
+  // Ctrl/⌘ + wheel (and trackpad pinch, which the browser reports the same way).
+  useEffect(() => {
+    const box = canvasBox.current;
+    if (!box) return;
+    function onWheel(event: WheelEvent) {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      event.preventDefault();
+      const rect = box!.getBoundingClientRect();
+      // Mouse wheels report ~100px per notch, trackpad pinches a few px per
+      // event; cap the step so a notch is ~1.2x and a pinch stays smooth.
+      const delta = Math.max(-25, Math.min(25, event.deltaMode === 1 ? event.deltaY * 20 : event.deltaY));
+      zoomBy(Math.exp(-delta * 0.008), {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top,
+      });
+    }
+    box.addEventListener("wheel", onWheel, { passive: false });
+    return () => box.removeEventListener("wheel", onWheel);
+  }, []);
 
   // Paint annotations; repaint once any web fonts finish loading.
   useEffect(() => {
@@ -622,7 +705,43 @@ export default function App() {
         redo();
         return;
       }
+      if (mod && key === "o") {
+        event.preventDefault();
+        if (!busy) fileInput.current?.click();
+        return;
+      }
+      if (mod && (key === "=" || key === "+")) {
+        event.preventDefault();
+        zoomBy(ZOOM_STEP);
+        return;
+      }
+      if (mod && key === "-") {
+        event.preventDefault();
+        zoomBy(1 / ZOOM_STEP);
+        return;
+      }
+      if (mod && key === "0") {
+        event.preventDefault();
+        setZoom(1);
+        return;
+      }
       if (typing) return;
+      if (!mod && !event.altKey && pdf && !busy) {
+        const byKey: Record<string, Tool> = {
+          v: "select",
+          t: "text",
+          d: "draw",
+          h: "highlight",
+          s: "sign",
+          i: "image",
+        };
+        const next = byKey[key];
+        if (next) {
+          event.preventDefault();
+          pickTool(next);
+          return;
+        }
+      }
       if ((event.key === "Delete" || event.key === "Backspace") && selectedId) {
         event.preventDefault();
         removeItem(selectedId);
@@ -705,7 +824,7 @@ export default function App() {
       const document = await getDocument({ data: bytes.slice() }).promise;
       setSource(bytes);
       setPdf(document);
-      setFilename(file.name);
+      setFilename(file.name.replace(/\.pdf$/i, "") + "-edited");
       setPageNumber(1);
       setAnnotations({});
       history.current = {};
@@ -991,27 +1110,13 @@ export default function App() {
     }
   }
 
-  async function savePdf() {
+  async function exportPdf() {
     if (!source || !pdf) return;
     finishEditing();
     setBusy(true);
     setStatus("Preparing your PDF…");
     try {
-      const outputName = filename.replace(/\.pdf$/i, "") + "-edited.pdf";
-      const picker = (window as Window & { showSaveFilePicker?: SavePicker })
-        .showSaveFilePicker;
-      // Open the picker immediately while the click's user activation exists.
-      const handle = picker
-        ? await picker.call(window, {
-            suggestedName: outputName,
-            types: [
-              {
-                description: "PDF document",
-                accept: { "application/pdf": [".pdf"] },
-              },
-            ],
-          })
-        : null;
+      const outputName = exportFilename(filename);
       const allText = Object.values(itemsRef.current)
         .flat()
         .filter((i): i is TextItem => i.kind === "text");
@@ -1056,28 +1161,17 @@ export default function App() {
       const blob = new Blob([new Uint8Array(bytes).buffer], {
         type: "application/pdf",
       });
-      if (handle) {
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-        setStatus("PDF saved to your selected location.");
-      } else {
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = outputName;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-        setStatus("Download started. Your browser controls the save location.");
-      }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = outputName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      setStatus(`Downloaded ${outputName}.`);
     } catch (error) {
-      setStatus(
-        error instanceof DOMException && error.name === "AbortError"
-          ? "Save cancelled."
-          : `Save failed: ${message(error)}`,
-      );
+      setStatus(`Export failed: ${message(error)}`);
     } finally {
       setBusy(false);
     }
@@ -1116,7 +1210,6 @@ export default function App() {
     { id: "sign", label: "Signature", shortcut: "S", icon: icon("M3 16c2.5-6 4.5-7 5.5-1 .7 4.5 2.5 3 4-1.5 1-3 2.5-2 3 1 .5 2.5 2 2 5.5-1M3 21h18") },
     { id: "image", label: "Image", shortcut: "I", icon: icon("M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4", <circle cx="16" cy="9" r="1.3" fill="currentColor" stroke="none" />) },
   ];
-  const sizeIcon = icon("M4 6h16", <><path d="M4 12h16" strokeWidth="2.6" /><path d="M4 18.5h16" strokeWidth="4" /></>);
 
   return (
     <div
@@ -1142,8 +1235,22 @@ export default function App() {
           </span>
         </div>
         <div className="topbar-right">
-          <button className="primary" disabled={!pdf || busy} onClick={() => void savePdf()}>
-            {busy ? "Please wait…" : "Save PDF"}
+          <label className="filename" title="File name for the exported PDF">
+            <input
+              type="text"
+              value={filename}
+              disabled={!pdf}
+              spellCheck={false}
+              aria-label="Export file name"
+              onChange={(event) => setFilename(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && pdf && !busy) void exportPdf();
+              }}
+            />
+            <span>.pdf</span>
+          </label>
+          <button className="primary" disabled={!pdf || busy} onClick={() => void exportPdf()}>
+            {busy ? "Please wait…" : "Export"}
           </button>
         </div>
       </header>
@@ -1161,81 +1268,104 @@ export default function App() {
       />
 
       <aside className="rail" aria-label="Tools">
-        {tools.map((t) => (
-          <button
-            key={t.id}
-            className={`rail-btn ${tool === t.id ? "active" : ""}`}
-            aria-label={t.label}
-            aria-pressed={tool === t.id}
-            data-tip={`${t.label}  ·  ${t.shortcut}`}
-            disabled={busy}
-            onClick={() => pickTool(t.id)}
-          >
-            {t.icon}
-          </button>
-        ))}
+        <button
+          className="rail-btn"
+          aria-label="Open PDF"
+          data-tip={`Open PDF  ·  ${MOD}O`}
+          disabled={busy}
+          onClick={() => fileInput.current?.click()}
+        >
+          {icon(
+            "M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6a1 1 0 0 1 .8.4L11.5 7h7A2.5 2.5 0 0 1 21 9.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5zM12 10.5v5M9.5 13h5",
+          )}
+        </button>
         <div className="rail-sep" />
-        <div className="rail-item" data-tip={tool === "highlight" ? "Highlight color" : "Color"}>
-          {tool === "highlight" ? (
-            <ColorPicker
-              label="Highlight color"
-              value={highlightColor}
-              defaultValue={DEFAULT_HIGHLIGHT}
-              onChange={setHighlightColor}
-            />
-          ) : (
-            <ColorPicker
-              label="Annotation color"
-              value={color}
-              defaultValue={DEFAULT_COLOR}
-              onChange={(next) => {
-                setColor(next);
-                if (selected?.kind === "text") updateItem(selected.id, { color: next });
-              }}
-            />
-          )}
-        </div>
-        <div className="rail-item" ref={sizeRoot} data-tip="Size">
-          <button
-            className={`rail-btn ${sizeOpen ? "active" : ""}`}
-            aria-label="Size"
-            aria-expanded={sizeOpen}
-            onClick={() => setSizeOpen((o) => !o)}
-          >
-            {sizeIcon}
-            <span className="rail-badge">{size}</span>
-          </button>
-          {sizeOpen && (
-            <div className="rail-pop" role="dialog" aria-label="Size">
-              <input
-                aria-label="Annotation size"
-                type="range"
-                min="6"
-                max="72"
-                value={size}
-                onChange={(event) => setSize(Number(event.target.value))}
-              />
-              <input
-                aria-label="Size value"
-                type="number"
-                min="6"
-                max="200"
-                value={size}
-                onChange={(event) =>
-                  setSize(Math.min(200, Math.max(1, Number(event.target.value) || 1)))
-                }
-              />
+        {tools.map((t) => {
+          const opts = TOOL_OPTIONS[t.id];
+          const active = tool === t.id;
+          const isHighlight = t.id === "highlight";
+          const current = isHighlight ? highlightColor : color;
+          const setCurrent = isHighlight ? setHighlightColor : setColor;
+          return (
+            <div
+              key={t.id}
+              className="rail-item"
+              ref={active && opts ? panelRoot : undefined}
+              data-tip={`${t.label}  ·  ${t.shortcut}`}
+            >
+              <button
+                className={`rail-btn ${active ? "active" : ""} ${opts ? "has-options" : ""}`}
+                aria-label={t.label}
+                aria-pressed={active}
+                aria-expanded={opts ? active && panelOpen : undefined}
+                disabled={busy}
+                onClick={() => {
+                  pickTool(t.id);
+                  setPanelOpen(opts ? (active ? !panelOpen : true) : false);
+                }}
+              >
+                {t.icon}
+                {opts && <span className="rail-dot" style={{ background: current }} />}
+              </button>
+              {active && opts && panelOpen && (
+                <div className="rail-pop tool-pop" role="dialog" aria-label={`${t.label} options`}>
+                  <div className="tool-pop-title">{t.label}</div>
+                  <div className="tool-pop-row">
+                    <span className="tool-pop-label">Color</span>
+                    <div className="quick-colors">
+                      {(isHighlight ? QUICK_HIGHLIGHTS : QUICK_COLORS).map((c) => (
+                        <button
+                          key={c}
+                          type="button"
+                          className={`quick-swatch ${c === current.toLowerCase() ? "selected" : ""}`}
+                          style={{ background: c }}
+                          aria-label={c}
+                          aria-pressed={c === current.toLowerCase()}
+                          onClick={() => setCurrent(c)}
+                        />
+                      ))}
+                      <ColorPicker
+                        label={isHighlight ? "Highlight color" : "Annotation color"}
+                        value={current}
+                        defaultValue={isHighlight ? DEFAULT_HIGHLIGHT : DEFAULT_COLOR}
+                        onChange={setCurrent}
+                      />
+                    </div>
+                  </div>
+                  <div className="tool-pop-row">
+                    <span className="tool-pop-label">{opts.sizeLabel}</span>
+                    <input
+                      aria-label={opts.sizeLabel}
+                      type="range"
+                      min={opts.min}
+                      max={opts.max}
+                      value={Math.min(opts.max, size)}
+                      onChange={(event) => setSize(Number(event.target.value))}
+                    />
+                    <input
+                      aria-label={`${opts.sizeLabel} value`}
+                      type="number"
+                      min={opts.min}
+                      max="200"
+                      value={size}
+                      onChange={(event) =>
+                        setSize(Math.min(200, Math.max(1, Number(event.target.value) || 1)))
+                      }
+                    />
+                  </div>
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          );
+        })}
       </aside>
 
-      <section className="canvas">
+      <section className="canvas" ref={canvasBox}>
         {pdf ? (
           <div
             ref={pageBox}
-            className={`page tool-${tool}`}
-            style={{ width: viewport?.width || 800 }}
+            className={`page tool-${tool} ${zoom !== 1 ? "zoomed" : ""}`}
+            style={{ width: (viewport?.width || 800) * zoom }}
           >
             <canvas ref={pageCanvas} className="pdf-canvas" />
             <canvas
@@ -1480,9 +1610,21 @@ export default function App() {
           </div>
         )}
         {pdf && (
-          <button className="link" disabled={busy} onClick={() => fileInput.current?.click()}>
-            Open another PDF
-          </button>
+          <div className="zoomctl" role="group" aria-label="Zoom">
+            <button aria-label="Zoom out" disabled={zoom <= ZOOM_MIN} onClick={() => zoomBy(1 / ZOOM_STEP)}>
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <path d="M6 12h12" />
+              </svg>
+            </button>
+            <button className="zoom-value" title={`Reset zoom (${MOD}0)`} onClick={() => setZoom(1)}>
+              {Math.round(zoom * 100)}%
+            </button>
+            <button aria-label="Zoom in" disabled={zoom >= ZOOM_MAX} onClick={() => zoomBy(ZOOM_STEP)}>
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <path d="M12 6v12M6 12h12" />
+              </svg>
+            </button>
+          </div>
         )}
       </nav>
     </div>
