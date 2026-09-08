@@ -9,6 +9,7 @@ import { getDocument, GlobalWorkerOptions, RenderingCancelledException } from "p
 import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
+  BlendMode,
   PDFDocument,
   degrees,
   concatTransformationMatrix,
@@ -137,7 +138,9 @@ const FONTS = [
 ];
 const SIGNATURE_FONT = "Dancing Script";
 const LINE_HEIGHT = 1.3;
-const HIGHLIGHT_ALPHA = 0.45;
+/** Highlights are blended with "multiply", so they sit behind the ink: text
+ * keeps its colour and white paper takes the highlight colour. */
+type PaintLayer = "highlights" | "marks";
 
 let nextId = 1;
 const uid = () => String(nextId++);
@@ -233,6 +236,7 @@ function paint(
   viewport: PageViewport,
   items: Item[],
   skipId: string | null = null,
+  layer: PaintLayer = "marks",
 ) {
   // Higher-resolution transparent overlay for crisp exports.
   const density = 2;
@@ -248,8 +252,21 @@ function paint(
     0,
     0,
   );
+  if (layer === "highlights") {
+    // Opaque fills: overlapping strokes never stack up, and the multiply blend
+    // applied by the caller keeps the text beneath fully legible.
+    for (const item of items) {
+      if (item.kind !== "highlight" || item.id === skipId) continue;
+      ctx.fillStyle = item.color;
+      for (const r of item.rects) {
+        roundRect(ctx, r, 2);
+        ctx.fill();
+      }
+    }
+    return;
+  }
   for (const item of items) {
-    if (item.id === skipId) continue;
+    if (item.id === skipId || item.kind === "highlight") continue;
     ctx.save();
     if (item.kind === "text") {
       const { lines, lineHeight } = layoutText(item);
@@ -277,13 +294,6 @@ function paint(
       });
     } else if (item.kind === "image") {
       ctx.drawImage(item.image, item.x, item.y, item.width, item.height);
-    } else if (item.kind === "highlight") {
-      ctx.globalAlpha = HIGHLIGHT_ALPHA;
-      ctx.fillStyle = item.color;
-      for (const r of item.rects) {
-        roundRect(ctx, r, 2);
-        ctx.fill();
-      }
     } else {
       ctx.strokeStyle = item.color;
       ctx.fillStyle = item.color;
@@ -576,6 +586,7 @@ export default function App() {
 
   const pageCanvas = useRef<HTMLCanvasElement>(null);
   const overlayCanvas = useRef<HTMLCanvasElement>(null);
+  const highlightCanvas = useRef<HTMLCanvasElement>(null);
   const pageBox = useRef<HTMLDivElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const floatbar = useRef<HTMLDivElement>(null);
@@ -743,13 +754,14 @@ export default function App() {
     if (!viewport || !overlayCanvas.current) return;
     const canvas = overlayCanvas.current;
     const all = draft ? [...items, draft] : items;
-    paint(canvas, viewport, all, editingId);
+    if (highlightCanvas.current) paint(highlightCanvas.current, viewport, all, editingId, "highlights");
+    paint(canvas, viewport, all, editingId, "marks");
     const fonts = all.filter((i): i is TextItem => i.kind === "text");
     if (!fonts.length) return;
     let cancelled = false;
     Promise.all(fonts.map((i) => document.fonts.load(fontString(i))))
       .then(() => {
-        if (!cancelled) paint(canvas, viewport, all, editingId);
+        if (!cancelled) paint(canvas, viewport, all, editingId, "marks");
       })
       .catch(() => undefined);
     return () => {
@@ -1635,32 +1647,40 @@ export default function App() {
         const index = Number(pageKey);
         const originalPage = await pdf.getPage(index);
         const view = originalPage.getViewport({ scale: 1.25 });
-        const canvas = document.createElement("canvas");
-        paint(canvas, view, drawable);
-        const png = await output.embedPng(
-          await (await canvasBlob(canvas)).arrayBuffer(),
-        );
         const target = output.getPage(index - 1);
         // Map the visible overlay back into PDF coordinates.
         // This also accounts for rotated pages and crop-box offsets.
         const origin = view.convertToPdfPoint(0, view.height);
         const right = view.convertToPdfPoint(view.width, view.height);
         const top = view.convertToPdfPoint(0, 0);
-        target.pushOperators(
-          pushGraphicsState(),
-          concatTransformationMatrix(
-            right[0] - origin[0],
-            right[1] - origin[1],
-            top[0] - origin[0],
-            top[1] - origin[1],
-            origin[0],
-            origin[1],
-          ),
-        );
-        target.drawImage(png, { x: 0, y: 0, width: 1, height: 1 });
-        target.pushOperators(popGraphicsState());
-        canvas.width = 0;
-        canvas.height = 0;
+        // Highlights go down first with a multiply blend (behind the ink),
+        // then everything else on top.
+        const layers: [PaintLayer, BlendMode][] = [
+          ["highlights", BlendMode.Multiply],
+          ["marks", BlendMode.Normal],
+        ];
+        for (const [layer, blendMode] of layers) {
+          const hasContent = drawable.some((i) => (i.kind === "highlight") === (layer === "highlights"));
+          if (!hasContent) continue;
+          const canvas = document.createElement("canvas");
+          paint(canvas, view, drawable, null, layer);
+          const png = await output.embedPng(await (await canvasBlob(canvas)).arrayBuffer());
+          canvas.width = 0;
+          canvas.height = 0;
+          target.pushOperators(
+            pushGraphicsState(),
+            concatTransformationMatrix(
+              right[0] - origin[0],
+              right[1] - origin[1],
+              top[0] - origin[0],
+              top[1] - origin[1],
+              origin[0],
+              origin[1],
+            ),
+          );
+          target.drawImage(png, { x: 0, y: 0, width: 1, height: 1, blendMode });
+          target.pushOperators(popGraphicsState());
+        }
       }
       const bytes = await output.save();
       const blob = new Blob([new Uint8Array(bytes).buffer], {
@@ -2128,6 +2148,7 @@ export default function App() {
                   </button>
                 ))}
             <canvas ref={pageCanvas} className="pdf-canvas" />
+            <canvas ref={highlightCanvas} className="highlight-layer" aria-hidden="true" />
             <canvas
               ref={overlayCanvas}
               className="overlay"
