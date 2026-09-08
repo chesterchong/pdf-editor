@@ -1038,10 +1038,14 @@ button.link:hover:not(:disabled) {
   position: absolute;
   z-index: 6;
   border-radius: 3px;
-  outline: 1.5px dashed #7c3aed80;
+  outline: 1px dashed #7c3aed4d;
   outline-offset: 1px;
-  background: #7c3aed0a;
   pointer-events: none;
+  transition: outline-color 0.12s, background 0.12s;
+}
+.link-box.hover {
+  outline: 1.5px dashed #7c3aedb3;
+  background: #7c3aed0f;
 }
 .link-chip {
   position: absolute;

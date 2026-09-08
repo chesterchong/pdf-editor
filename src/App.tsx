@@ -847,6 +847,7 @@ export default function App() {
   const [pageLinks, setPageLinks] = useState<PageLink[]>([]);
   const [linkEdit, setLinkEdit] = useState<{ rect: Rect; url: string; target: { kind: "original"; rect: Rect } | { kind: "item"; id: string } | { kind: "new" } } | null>(null);
   const [hoverRegion, setHoverRegion] = useState<Rect | null>(null);
+  const [hoverLink, setHoverLink] = useState<string | null>(null);
   const hoverKey = useRef("");
   const [ocr, setOcr] = useState({ running: false, progress: 0 });
   // OCR results per page of the active file; cleared when the file or its pages change.
@@ -2186,12 +2187,16 @@ export default function App() {
   function pointerMove(event: ReactPointerEvent<Element>) {
     const d = drag.current;
     if (tool === "edit" && !d && viewport) {
-      const region = findRegion(point(event));
+      const p = point(event);
+      const region = findRegion(p);
       const key = region ? `${region.rect.x},${region.rect.y},${region.rect.w},${region.rect.h}` : "";
       if (key !== hoverKey.current) {
         hoverKey.current = key;
         setHoverRegion(region?.rect ?? null);
       }
+      const link = visibleLinks().find((l) => inRect(p, l.rect));
+      const linkKey = link ? `${link.rect.x},${link.rect.y}` : null;
+      if (linkKey !== hoverLink) setHoverLink(linkKey);
     }
     if (!d || !viewport || !event.isPrimary) return;
     const p = point(event);
@@ -3153,7 +3158,7 @@ export default function App() {
               visibleLinks().map((l, i) => (
                 <div
                   key={i}
-                  className="link-box"
+                  className={`link-box ${hoverLink === `${l.rect.x},${l.rect.y}` ? "hover" : ""}`}
                   style={{
                     left: pct(l.rect.x, viewport.width),
                     top: pct(l.rect.y, viewport.height),
@@ -3161,6 +3166,7 @@ export default function App() {
                     height: pct(l.rect.h, viewport.height),
                   }}
                 >
+                  {hoverLink === `${l.rect.x},${l.rect.y}` && (
                   <button
                     type="button"
                     className="link-chip"
@@ -3173,6 +3179,7 @@ export default function App() {
                     </svg>
                     {l.url ? linkLabel(l.url) : "internal link"}
                   </button>
+                  )}
                 </div>
               ))}
             {viewport && linkEdit && (
