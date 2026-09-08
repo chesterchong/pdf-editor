@@ -1125,14 +1125,14 @@ export default function App() {
       onDrop={onDrop}
     >
       <header className="topbar">
-        <div className="brand">
-          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round">
-            <path d="M7 3h7l5 5v13H7z" />
-            <path d="M14 3v5h5M10 13h5M10 17h5" strokeLinecap="round" />
-          </svg>
-          <span>PDF Studio</span>
-        </div>
-        <div className="topbar-right">
+        <div className="topbar-left">
+          <div className="brand">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round">
+              <path d="M7 3h7l5 5v13H7z" />
+              <path d="M14 3v5h5M10 13h5M10 17h5" strokeLinecap="round" />
+            </svg>
+            <span>PDF Studio</span>
+          </div>
           <span className="pill" title={PRIVACY}>
             <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <rect x="5" y="11" width="14" height="10" rx="2" />
@@ -1140,6 +1140,8 @@ export default function App() {
             </svg>
             Processed locally, never uploaded
           </span>
+        </div>
+        <div className="topbar-right">
           <button className="primary" disabled={!pdf || busy} onClick={() => void savePdf()}>
             {busy ? "Please wait…" : "Save PDF"}
           </button>

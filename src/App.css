@@ -42,6 +42,7 @@ body {
 .brand svg {
   color: #2563eb;
 }
+.topbar-left,
 .topbar-right {
   display: flex;
   align-items: center;
