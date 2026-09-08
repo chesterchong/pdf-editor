@@ -58,6 +58,8 @@ type TextItem = {
   italic: boolean;
   underline: boolean;
   strike: boolean;
+  /** Created with the Signature tool: fixed script font, no text toolbar. */
+  signature?: boolean;
 };
 type ImageItem = {
   kind: "image";
@@ -100,9 +102,10 @@ function exportFilename(raw: string): string {
 
 const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl+";
 
-/** Tools with a colour/size fly-out. Text and Signature are excluded: their
- * floating toolbar already covers font, size and colour once a box exists. */
+/** Tools with a colour/size fly-out. Text is excluded: its floating toolbar
+ * already covers font, size and colour once a box exists. */
 const TOOL_OPTIONS: Partial<Record<Tool, { sizeLabel: string; min: number; max: number }>> = {
+  sign: { sizeLabel: "Size", min: 16, max: 96 },
   draw: { sizeLabel: "Thickness", min: 6, max: 72 },
   highlight: { sizeLabel: "Height", min: 6, max: 72 },
 };
@@ -437,6 +440,7 @@ export default function App() {
   const [color, setColor] = useState(DEFAULT_COLOR);
   const [highlightColor, setHighlightColor] = useState(DEFAULT_HIGHLIGHT);
   const [size, setSize] = useState(18);
+  const [signSize, setSignSize] = useState(36);
   const [font, setFont] = useState("Arial");
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   const [draft, setDraft] = useState<Item | null>(null);
@@ -967,9 +971,9 @@ export default function App() {
       return;
     }
     if (tool === "text" || tool === "sign") {
-      // A signature is a text box preset to a script font at a larger size.
+      // A signature is a text box fixed to a script font with its own size.
       const sign = tool === "sign";
-      const textSize = sign ? Math.max(28, size * 2) : size;
+      const textSize = sign ? signSize : size;
       const width = Math.max(
         sign ? 220 : 120,
         Math.min(sign ? 360 : 260, viewport.width - p.x - 8),
@@ -984,6 +988,7 @@ export default function App() {
         color,
         size: textSize,
         font: sign ? SIGNATURE_FONT : font,
+        signature: sign,
         bold: false,
         italic: false,
         underline: false,
@@ -1333,8 +1338,11 @@ export default function App() {
           const opts = TOOL_OPTIONS[t.id];
           const active = tool === t.id;
           const isHighlight = t.id === "highlight";
+          const isSign = t.id === "sign";
           const current = isHighlight ? highlightColor : color;
           const setCurrent = isHighlight ? setHighlightColor : setColor;
+          const sizeValue = isSign ? signSize : size;
+          const setSizeValue = isSign ? setSignSize : setSize;
           return (
             <div
               key={t.id}
@@ -1388,17 +1396,17 @@ export default function App() {
                       type="range"
                       min={opts.min}
                       max={opts.max}
-                      value={Math.min(opts.max, size)}
-                      onChange={(event) => setSize(Number(event.target.value))}
+                      value={Math.min(opts.max, sizeValue)}
+                      onChange={(event) => setSizeValue(Number(event.target.value))}
                     />
                     <input
                       aria-label={`${opts.sizeLabel} value`}
                       type="number"
                       min={opts.min}
                       max="200"
-                      value={size}
+                      value={sizeValue}
                       onChange={(event) =>
-                        setSize(Math.min(200, Math.max(1, Number(event.target.value) || 1)))
+                        setSizeValue(Math.min(200, Math.max(1, Number(event.target.value) || 1)))
                       }
                     />
                   </div>
@@ -1477,7 +1485,7 @@ export default function App() {
               </div>
             )}
 
-            {viewport && selected && selectedRect && barPos && (
+            {viewport && selected && selectedRect && barPos && !(selected.kind === "text" && selected.signature) && (
               <div
                 ref={floatbar}
                 className="floatbar"
