@@ -9,6 +9,7 @@ import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
   PDFDocument,
+  degrees,
   concatTransformationMatrix,
   popGraphicsState,
   pushGraphicsState,
@@ -20,6 +21,7 @@ import "@fontsource/pacifico/400.css";
 import "@fontsource/caveat/400.css";
 import "@fontsource/caveat/700.css";
 import { ColorPicker } from "./ColorPicker";
+import { PageThumb } from "./PageThumb";
 import "./App.css";
 
 GlobalWorkerOptions.workerSrc = workerUrl;
@@ -424,6 +426,97 @@ function message(error: unknown) {
   return error instanceof Error ? error.message : "Something went wrong.";
 }
 
+type Annotations = Record<number, Item[]>;
+type StructSnapshot = { pdf: PDFDocumentProxy; source: Uint8Array; annotations: Annotations };
+/** Everything that belongs to one open file; swapped in and out when tabs change. */
+type DocState = {
+  pdf: PDFDocumentProxy;
+  source: Uint8Array;
+  exportName: string;
+  annotations: Annotations;
+  history: Record<number, Item[][]>;
+  future: Record<number, Item[][]>;
+  structHistory: StructSnapshot[];
+  pageNumber: number;
+  zoom: number;
+};
+type Doc = { id: string; name: string; state: DocState };
+
+function freshDocState(pdf: PDFDocumentProxy, source: Uint8Array, exportName: string, annotations: Annotations = {}): DocState {
+  return { pdf, source, exportName, annotations, history: {}, future: {}, structHistory: [], pageNumber: 1, zoom: 1 };
+}
+
+/** Move items to where they land after the page turns `delta` degrees clockwise.
+ * W/H are the page's viewport size before the turn. Text and images keep their
+ * size and stay upright; only their centre moves. */
+function rotateItems(items: Item[], delta: number, W: number, H: number): Item[] {
+  const turns = (((delta / 90) % 4) + 4) % 4;
+  if (!turns) return items;
+  const pt = (p: Point): Point =>
+    turns === 1 ? { x: H - p.y, y: p.x } : turns === 2 ? { x: W - p.x, y: H - p.y } : { x: p.y, y: W - p.x };
+  const rect = (r: Rect): Rect => {
+    const a = pt({ x: r.x, y: r.y });
+    const b = pt({ x: r.x + r.w, y: r.y + r.h });
+    return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) };
+  };
+  return items.map((i) => {
+    if (i.kind === "stroke") return { ...i, points: i.points.map(pt) };
+    if (i.kind === "highlight") return { ...i, rects: i.rects.map(rect) };
+    const r = itemRect(i);
+    const c = pt({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
+    return { ...i, x: c.x - r.w / 2, y: c.y - r.h / 2 };
+  });
+}
+
+function shiftItems(items: Item[], dx: number, dy: number): Item[] {
+  return items.map((i) =>
+    i.kind === "stroke"
+      ? { ...i, points: i.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) }
+      : i.kind === "highlight"
+        ? { ...i, rects: i.rects.map((r) => ({ ...r, x: r.x + dx, y: r.y + dy })) }
+        : { ...i, x: i.x + dx, y: i.y + dy },
+  );
+}
+
+/** Re-key annotations for a new page order: `order[i]` is the 1-based old page that becomes page i+1. */
+function remapAnnotations(ann: Annotations, order: number[]): Annotations {
+  const out: Annotations = {};
+  order.forEach((oldPage, i) => {
+    if (ann[oldPage]?.length) out[i + 1] = ann[oldPage];
+  });
+  return out;
+}
+
+async function rotatePdfPage(bytes: Uint8Array, index: number, delta: number) {
+  const doc = await PDFDocument.load(bytes.slice());
+  const page = doc.getPage(index);
+  page.setRotation(degrees((((page.getRotation().angle + delta) % 360) + 360) % 360));
+  return doc.save();
+}
+
+async function cropPdfPage(bytes: Uint8Array, index: number, box: Rect) {
+  const doc = await PDFDocument.load(bytes.slice());
+  doc.getPage(index).setCropBox(box.x, box.y, box.w, box.h);
+  return doc.save();
+}
+
+/** Build a new document from `order` (0-based page indices of `bytes`). Used for reorder, remove and extract. */
+async function pickPdfPages(bytes: Uint8Array, order: number[]) {
+  const src = await PDFDocument.load(bytes.slice());
+  const out = await PDFDocument.create();
+  for (const page of await out.copyPages(src, order)) out.addPage(page);
+  return out.save();
+}
+
+async function mergePdfs(sources: Uint8Array[]) {
+  const out = await PDFDocument.create();
+  for (const bytes of sources) {
+    const src = await PDFDocument.load(bytes.slice());
+    for (const page of await out.copyPages(src, src.getPageIndices())) out.addPage(page);
+  }
+  return out.save();
+}
+
 function pct(value: number, total: number) {
   return `${(value / total) * 100}%`;
 }
@@ -449,6 +542,16 @@ export default function App() {
   const [cssScale, setCssScale] = useState(1);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
+  const [docs, setDocs] = useState<Doc[]>([]);
+  const [activeDocId, setActiveDocId] = useState<string | null>(null);
+  const structHistory = useRef<StructSnapshot[]>([]);
+  const [organizing, setOrganizing] = useState(false);
+  const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
+  const [dragPage, setDragPage] = useState<number | null>(null);
+  const [dropTarget, setDropTarget] = useState<number | null>(null);
+  const [cropRect, setCropRect] = useState<Rect | null>(null);
+  const [cropPending, setCropPending] = useState(false);
+  const cropDrag = useRef<{ mode: "move" | "resize" | "draw"; handle?: Handle; start: Point; orig: Rect } | null>(null);
 
   const pageCanvas = useRef<HTMLCanvasElement>(null);
   const overlayCanvas = useRef<HTMLCanvasElement>(null);
@@ -601,6 +704,14 @@ export default function App() {
     return () => box.removeEventListener("wheel", onWheel);
   }, []);
 
+  // Start a crop once the page it targets has rendered.
+  useEffect(() => {
+    if (!cropPending || !viewport) return;
+    setCropPending(false);
+    const inset = Math.round(Math.min(viewport.width, viewport.height) * 0.08);
+    setCropRect({ x: inset, y: inset, w: viewport.width - inset * 2, h: viewport.height - inset * 2 });
+  }, [cropPending, viewport]);
+
   // Paint annotations; repaint once any web fonts finish loading.
   useEffect(() => {
     if (!viewport || !overlayCanvas.current) return;
@@ -672,11 +783,11 @@ export default function App() {
   function onDrop(event: ReactDragEvent) {
     event.preventDefault();
     const files = Array.from(event.dataTransfer.files);
-    const pdfFile = files.find(
+    const pdfFiles = files.filter(
       (f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name),
     );
-    if (pdfFile) {
-      void openPdf(pdfFile);
+    if (pdfFiles.length) {
+      void openPdfs(pdfFiles);
       return;
     }
     const imageFile = files.find((f) => f.type.startsWith("image/"));
@@ -694,7 +805,9 @@ export default function App() {
           target.tagName === "TEXTAREA" ||
           target.tagName === "SELECT");
       if (event.key === "Escape") {
-        if (editingId) finishEditing();
+        if (cropRect) setCropRect(null);
+        else if (editingId) finishEditing();
+        else if (organizing) setOrganizing(false);
         else setSelectedId(null);
         return;
       }
@@ -704,14 +817,28 @@ export default function App() {
       // browser's own text undo takes over.
       if (mod && !typing && key === "z") {
         event.preventDefault();
-        if (event.shiftKey) redo();
+        if (organizing) {
+          if (!event.shiftKey) undoStructure();
+        } else if (event.shiftKey) redo();
         else undo();
         return;
       }
       if (mod && !typing && key === "y") {
         event.preventDefault();
-        redo();
+        if (!organizing) redo();
         return;
+      }
+      if (organizing && pdf && !typing) {
+        if (mod && key === "a") {
+          event.preventDefault();
+          setSelectedPages(new Set(Array.from({ length: pdf.numPages }, (_, i) => i)));
+          return;
+        }
+        if ((event.key === "Delete" || event.key === "Backspace") && selectedPages.size) {
+          event.preventDefault();
+          void removePages([...selectedPages]);
+          return;
+        }
       }
       if (mod && key === "o") {
         event.preventDefault();
@@ -821,7 +948,7 @@ export default function App() {
     setSelectedId(null);
     setAnnotations({});
     setStatus(
-      `Removed ${count === 1 ? "1 annotation" : `${count} annotations`}. Undo on each page with ${MOD}Z.`,
+      count === 1 ? "Annotation removed" : `${count} annotations removed`,
     );
   }
 
@@ -837,6 +964,7 @@ export default function App() {
     setEditingId(null);
     setSelectedId(null);
     setAnnotations((current) => ({ ...current, [pageNumber]: previous }));
+    setStatus("Undone");
   }
 
   function redo() {
@@ -851,35 +979,293 @@ export default function App() {
     setEditingId(null);
     setSelectedId(null);
     setAnnotations((current) => ({ ...current, [pageNumber]: next }));
+    setStatus("Redone");
   }
 
-  async function openPdf(file: File) {
-    if (
-      source &&
-      !window.confirm("Open another PDF? Unsaved edits will be discarded.")
-    )
-      return;
-    setBusy(true);
-    setStatus("Opening PDF…");
-    try {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      // PDF.js can transfer ownership of its buffer; keep a separate copy.
-      const document = await getDocument({ data: bytes.slice() }).promise;
-      setSource(bytes);
-      setPdf(document);
-      setFilename(file.name.replace(/\.pdf$/i, "") + "-edited");
-      setPageNumber(1);
+  /** Snapshot of the active file, taken before switching or closing tabs. */
+  function snapshotState(): DocState {
+    return {
+      pdf: pdf!,
+      source: source!,
+      exportName: filename,
+      annotations: itemsRef.current,
+      history: history.current,
+      future: future.current,
+      structHistory: structHistory.current,
+      pageNumber,
+      zoom,
+    };
+  }
+
+  function loadState(state: DocState) {
+    setPdf(state.pdf);
+    setSource(state.source);
+    setFilename(state.exportName);
+    setAnnotations(state.annotations);
+    history.current = state.history;
+    future.current = state.future;
+    structHistory.current = state.structHistory;
+    setPageNumber(state.pageNumber);
+    setZoom(state.zoom);
+    setSelectedId(null);
+    setEditingId(null);
+    setSelectedPages(new Set());
+    setCropRect(null);
+  }
+
+  /** Add files as tabs (saving the current one first) and show the last of them. */
+  function addDocs(added: Doc[]) {
+    if (!added.length) return;
+    setDocs((list) => [
+      ...list.map((d) => (d.id === activeDocId && pdf && source ? { ...d, state: snapshotState() } : d)),
+      ...added,
+    ]);
+    const last = added[added.length - 1];
+    loadState(last.state);
+    setActiveDocId(last.id);
+  }
+
+  function activateDoc(id: string) {
+    if (id === activeDocId) return;
+    const target = docs.find((d) => d.id === id);
+    if (!target) return;
+    finishEditing();
+    setDocs((list) => list.map((d) => (d.id === activeDocId && pdf && source ? { ...d, state: snapshotState() } : d)));
+    loadState(target.state);
+    setActiveDocId(id);
+  }
+
+  function closeDoc(id: string) {
+    const index = docs.findIndex((d) => d.id === id);
+    if (index < 0) return;
+    const remaining = docs.filter((d) => d.id !== id);
+    setDocs(remaining);
+    if (id !== activeDocId) return;
+    const next = remaining[Math.min(index, remaining.length - 1)];
+    if (next) {
+      loadState(next.state);
+      setActiveDocId(next.id);
+    } else {
+      setPdf(null);
+      setSource(null);
       setAnnotations({});
       history.current = {};
       future.current = {};
-      setStatus(
-        `Opened ${file.name} · ${document.numPages} ${document.numPages === 1 ? "page" : "pages"}.`,
-      );
+      structHistory.current = [];
+      setActiveDocId(null);
+      setOrganizing(false);
+      setCropRect(null);
+    }
+    setStatus("File closed");
+  }
+
+  async function openPdfs(files: File[]) {
+    if (!files.length) return;
+    setBusy(true);
+    setStatus(files.length === 1 ? "Opening file…" : "Opening files…");
+    const added: Doc[] = [];
+    try {
+      for (const file of files) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        // PDF.js can transfer ownership of its buffer; keep a separate copy.
+        const document = await getDocument({ data: bytes.slice() }).promise;
+        const name = file.name.replace(/\.pdf$/i, "");
+        added.push({ id: uid(), name, state: freshDocState(document, bytes, `${name}-edited`) });
+      }
+      addDocs(added);
+      setStatus(added.length === 1 ? "Opened new file" : `Opened ${added.length} files`);
     } catch (error) {
+      addDocs(added);
       setStatus(`Could not open PDF: ${message(error)}`);
     } finally {
       setBusy(false);
     }
+  }
+  const openPdf = (file: File) => openPdfs([file]);
+
+  // ---- Page organisation: rotate, crop, reorder, remove, extract, combine ----
+
+  /** Swap in a restructured document, keeping the previous one for undo. */
+  async function applyStructure(nextBytes: Uint8Array, nextAnnotations: Annotations, statusText: string, nextPage?: number) {
+    if (!pdf || !source) return;
+    setBusy(true);
+    try {
+      const nextPdf = await getDocument({ data: nextBytes.slice() }).promise;
+      structHistory.current = [...structHistory.current.slice(-9), { pdf, source, annotations: itemsRef.current }];
+      finishEditing();
+      setSource(nextBytes);
+      setPdf(nextPdf);
+      setAnnotations(nextAnnotations);
+      // Per-page item history no longer lines up with the pages; start fresh.
+      history.current = {};
+      future.current = {};
+      setPageNumber(Math.min(Math.max(1, nextPage ?? pageNumber), nextPdf.numPages));
+      setSelectedId(null);
+      setSelectedPages(new Set());
+      setStatus(statusText);
+    } catch (error) {
+      setStatus(`Could not change pages: ${message(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function undoStructure() {
+    const snap = structHistory.current.pop();
+    if (!snap) return;
+    setSource(snap.source);
+    setPdf(snap.pdf);
+    setAnnotations(snap.annotations);
+    history.current = {};
+    future.current = {};
+    setPageNumber((n) => Math.min(n, snap.pdf.numPages));
+    setSelectedPages(new Set());
+    setStatus("Page change undone");
+  }
+
+  async function rotatePage(index: number, delta: number) {
+    if (!pdf || !source) return;
+    const view = (await pdf.getPage(index + 1)).getViewport({ scale: 1.25 });
+    const bytes = await rotatePdfPage(source, index, delta);
+    const items = itemsRef.current;
+    await applyStructure(
+      bytes,
+      { ...items, [index + 1]: rotateItems(items[index + 1] ?? [], delta, view.width, view.height) },
+      "Page rotated",
+    );
+  }
+
+  async function removePages(indices: number[]) {
+    if (!pdf || !source) return;
+    const gone = new Set(indices);
+    const keep = Array.from({ length: pdf.numPages }, (_, i) => i).filter((i) => !gone.has(i));
+    if (!keep.length) {
+      setStatus("A file needs at least one page");
+      return;
+    }
+    const bytes = await pickPdfPages(source, keep);
+    await applyStructure(
+      bytes,
+      remapAnnotations(itemsRef.current, keep.map((i) => i + 1)),
+      gone.size === 1 ? "Page removed" : `${gone.size} pages removed`,
+      Math.min(pageNumber, keep.length),
+    );
+  }
+
+  async function movePage(from: number, to: number) {
+    if (!pdf || !source || from === to) return;
+    const order = Array.from({ length: pdf.numPages }, (_, i) => i);
+    const [moved] = order.splice(from, 1);
+    order.splice(to, 0, moved);
+    const bytes = await pickPdfPages(source, order);
+    await applyStructure(bytes, remapAnnotations(itemsRef.current, order.map((i) => i + 1)), "Page moved", to + 1);
+  }
+
+  async function extractPages(indices: number[]) {
+    if (!pdf || !source || !indices.length) return;
+    const order = [...indices].sort((a, b) => a - b);
+    setBusy(true);
+    try {
+      const bytes = await pickPdfPages(source, order);
+      const nextPdf = await getDocument({ data: bytes.slice() }).promise;
+      const base = docs.find((d) => d.id === activeDocId)?.name ?? "document";
+      const name = `${base} (${order.length === 1 ? `page ${order[0] + 1}` : `${order.length} pages`})`;
+      addDocs([{ id: uid(), name, state: freshDocState(nextPdf, bytes, name, remapAnnotations(itemsRef.current, order.map((i) => i + 1))) }]);
+      setOrganizing(true);
+      setStatus("Pages extracted to new file");
+    } catch (error) {
+      setStatus(`Could not extract pages: ${message(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function combineAll() {
+    if (docs.length < 2 || !pdf || !source) return;
+    setBusy(true);
+    try {
+      const all = docs.map((d) => (d.id === activeDocId ? { ...d, state: snapshotState() } : d));
+      const bytes = await mergePdfs(all.map((d) => d.state.source));
+      const nextPdf = await getDocument({ data: bytes.slice() }).promise;
+      const annotations: Annotations = {};
+      let offset = 0;
+      for (const d of all) {
+        for (const [key, list] of Object.entries(d.state.annotations)) {
+          if (list.length) annotations[Number(key) + offset] = list;
+        }
+        offset += d.state.pdf.numPages;
+      }
+      addDocs([{ id: uid(), name: "Combined", state: freshDocState(nextPdf, bytes, "Combined", annotations) }]);
+      setOrganizing(true);
+      setStatus(`${all.length} files combined`);
+    } catch (error) {
+      setStatus(`Could not combine files: ${message(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function startCrop(index: number) {
+    setOrganizing(false);
+    setPageNumber(index + 1);
+    setCropPending(true);
+  }
+
+  async function applyCrop() {
+    if (!cropRect || !viewport || !source || !pdf) return;
+    const a = viewport.convertToPdfPoint(cropRect.x, cropRect.y);
+    const b = viewport.convertToPdfPoint(cropRect.x + cropRect.w, cropRect.y + cropRect.h);
+    const box = { x: Math.min(a[0], b[0]), y: Math.min(a[1], b[1]), w: Math.abs(a[0] - b[0]), h: Math.abs(a[1] - b[1]) };
+    const bytes = await cropPdfPage(source, pageNumber - 1, box);
+    const items = itemsRef.current;
+    setCropRect(null);
+    await applyStructure(bytes, { ...items, [pageNumber]: shiftItems(items[pageNumber] ?? [], -cropRect.x, -cropRect.y) }, "Page cropped");
+  }
+
+  function cropPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!cropRect || !viewport || event.button !== 0) return;
+    event.preventDefault();
+    const target = event.target as HTMLElement;
+    const handle = target.dataset.handle as Handle | undefined;
+    const p = point(event);
+    const inside = inRect(p, cropRect);
+    cropDrag.current = handle
+      ? { mode: "resize", handle, start: p, orig: cropRect }
+      : inside
+        ? { mode: "move", start: p, orig: cropRect }
+        : { mode: "draw", start: p, orig: { x: p.x, y: p.y, w: 0, h: 0 } };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function cropPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const d = cropDrag.current;
+    if (!d || !viewport) return;
+    const p = point(event);
+    const clampX = (x: number) => Math.min(viewport.width, Math.max(0, x));
+    const clampY = (y: number) => Math.min(viewport.height, Math.max(0, y));
+    const o = d.orig;
+    if (d.mode === "move") {
+      const x = Math.min(viewport.width - o.w, Math.max(0, o.x + p.x - d.start.x));
+      const y = Math.min(viewport.height - o.h, Math.max(0, o.y + p.y - d.start.y));
+      setCropRect({ ...o, x, y });
+      return;
+    }
+    let x0 = o.x, y0 = o.y, x1 = o.x + o.w, y1 = o.y + o.h;
+    if (d.mode === "draw") {
+      x0 = d.start.x; y0 = d.start.y; x1 = clampX(p.x); y1 = clampY(p.y);
+    } else {
+      const h = d.handle!;
+      if (h.includes("w")) x0 = clampX(p.x);
+      if (h.includes("e")) x1 = clampX(p.x);
+      if (h.startsWith("n")) y0 = clampY(p.y);
+      if (h.startsWith("s")) y1 = clampY(p.y);
+    }
+    const x = Math.min(x0, x1), y = Math.min(y0, y1);
+    setCropRect({ x, y, w: Math.max(16, Math.abs(x1 - x0)), h: Math.max(16, Math.abs(y1 - y0)) });
+  }
+
+  function cropPointerUp() {
+    cropDrag.current = null;
   }
 
   async function openImage(file: File) {
@@ -1156,6 +1542,8 @@ export default function App() {
 
   function pickTool(next: Tool) {
     finishEditing();
+    setOrganizing(false);
+    setCropRect(null);
     setTool(next);
     if (next !== "select") setSelectedId(null);
     if (next === "image" && !image) {
@@ -1222,7 +1610,7 @@ export default function App() {
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      setStatus(`Downloaded ${outputName}.`);
+      setStatus("Exported");
     } catch (error) {
       setStatus(`Export failed: ${message(error)}`);
     } finally {
@@ -1288,6 +1676,54 @@ export default function App() {
             Processed locally, never uploaded
           </span>
         </div>
+        {docs.length > 0 && (
+          <div className="tabs" role="tablist" aria-label="Open files">
+            {docs.map((d) => (
+              <div
+                key={d.id}
+                role="tab"
+                tabIndex={0}
+                aria-selected={d.id === activeDocId}
+                className={`tab ${d.id === activeDocId ? "active" : ""}`}
+                title={d.name}
+                onClick={() => activateDoc(d.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") activateDoc(d.id);
+                }}
+              >
+                <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round">
+                  <path d="M7 3h7l5 5v13H7z" />
+                </svg>
+                <span className="tab-name">{d.name}</span>
+                <button
+                  className="tab-close"
+                  aria-label={`Close ${d.name}`}
+                  title="Close"
+                  disabled={busy}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    closeDoc(d.id);
+                  }}
+                >
+                  <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+                    <path d="M6 6l12 12M18 6 6 18" />
+                  </svg>
+                </button>
+              </div>
+            ))}
+            <button
+              className="tab-add"
+              aria-label="Open another PDF"
+              title={`Open another PDF · ${MOD}O`}
+              disabled={busy}
+              onClick={() => fileInput.current?.click()}
+            >
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+          </div>
+        )}
         <div className="topbar-right">
           <label className="filename" title="File name for the exported PDF">
             <input
@@ -1313,10 +1749,10 @@ export default function App() {
         ref={fileInput}
         type="file"
         accept=".pdf,application/pdf"
+        multiple
         hidden
         onChange={(event) => {
-          const file = event.target.files?.[0];
-          if (file) void openPdf(file);
+          void openPdfs(Array.from(event.target.files ?? []));
           event.target.value = "";
         }}
       />
@@ -1415,6 +1851,22 @@ export default function App() {
             </div>
           );
         })}
+        <div className="rail-sep" />
+        <button
+          className={`rail-btn ${organizing ? "active" : ""}`}
+          aria-label="Organize pages"
+          aria-pressed={organizing}
+          data-tip="Organize pages"
+          disabled={busy || !pdf}
+          onClick={() => {
+            finishEditing();
+            setCropRect(null);
+            setSelectedId(null);
+            setOrganizing((o) => !o);
+          }}
+        >
+          {icon("M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z")}
+        </button>
         <div className="rail-spacer" />
         <button
           className="rail-btn danger"
@@ -1430,7 +1882,136 @@ export default function App() {
       </aside>
 
       <section className="canvas" ref={canvasBox}>
-        {pdf ? (
+        {pdf && organizing ? (
+          <div className="organize">
+            <div className="organize-bar">
+              <div className="organize-info">
+                <strong>{docs.find((d) => d.id === activeDocId)?.name}</strong>
+                <span>
+                  {pdf.numPages} {pdf.numPages === 1 ? "page" : "pages"}
+                  {selectedPages.size ? ` · ${selectedPages.size} selected` : " · drag to reorder, hover a page for actions"}
+                </span>
+              </div>
+              <div className="organize-actions">
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    setSelectedPages(
+                      selectedPages.size === pdf.numPages
+                        ? new Set()
+                        : new Set(Array.from({ length: pdf.numPages }, (_, i) => i)),
+                    )
+                  }
+                >
+                  {selectedPages.size === pdf.numPages ? "Deselect all" : "Select all"}
+                </button>
+                <button disabled={busy || !selectedPages.size} onClick={() => void extractPages([...selectedPages])}>
+                  Extract to new file
+                </button>
+                <button
+                  className="danger"
+                  disabled={busy || !selectedPages.size || selectedPages.size >= pdf.numPages}
+                  onClick={() => void removePages([...selectedPages])}
+                >
+                  Remove
+                </button>
+                <span className="sep" />
+                <button disabled={busy || docs.length < 2} title="Merge every open file, in tab order, into a new file" onClick={() => void combineAll()}>
+                  Combine {docs.length > 1 ? `${docs.length} files` : "files"}
+                </button>
+                <button disabled={busy || !structHistory.current.length} onClick={undoStructure}>
+                  Undo
+                </button>
+                <button className="primary" onClick={() => setOrganizing(false)}>
+                  Done
+                </button>
+              </div>
+            </div>
+            <div className="page-grid" onDragOver={(event) => event.preventDefault()}>
+              {Array.from({ length: pdf.numPages }, (_, i) => (
+                <div
+                  key={i}
+                  className={`page-card ${selectedPages.has(i) ? "selected" : ""} ${dropTarget === i && dragPage !== i ? "drop-target" : ""} ${dragPage === i ? "dragging" : ""} ${pageNumber === i + 1 ? "current" : ""}`}
+                  draggable={!busy}
+                  onDragStart={(event) => {
+                    setDragPage(i);
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", String(i));
+                  }}
+                  onDragEnter={() => setDropTarget(i)}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                  }}
+                  onDragEnd={() => {
+                    setDragPage(null);
+                    setDropTarget(null);
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const from = dragPage ?? Number(event.dataTransfer.getData("text/plain"));
+                    setDragPage(null);
+                    setDropTarget(null);
+                    if (Number.isFinite(from)) void movePage(from, i);
+                  }}
+                  onClick={() =>
+                    setSelectedPages((set) => {
+                      const next = new Set(set);
+                      if (next.has(i)) next.delete(i);
+                      else next.add(i);
+                      return next;
+                    })
+                  }
+                  onDoubleClick={() => {
+                    setPageNumber(i + 1);
+                    setOrganizing(false);
+                  }}
+                >
+                  <PageThumb pdf={pdf} index={i + 1} width={148} />
+                  <label className="page-check" onClick={(event) => event.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selectedPages.has(i)}
+                      aria-label={`Select page ${i + 1}`}
+                      onChange={(event) =>
+                        setSelectedPages((set) => {
+                          const next = new Set(set);
+                          if (event.target.checked) next.add(i);
+                          else next.delete(i);
+                          return next;
+                        })
+                      }
+                    />
+                  </label>
+                  <div className="page-actions" onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
+                    <button aria-label="Rotate left" title="Rotate left" disabled={busy} onClick={() => void rotatePage(i, -90)}>
+                      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M3 8V3m0 5h5M3 8a9 9 0 1 1 2.6 8.4" />
+                      </svg>
+                    </button>
+                    <button aria-label="Rotate right" title="Rotate right" disabled={busy} onClick={() => void rotatePage(i, 90)}>
+                      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21 8V3m0 5h-5M21 8a9 9 0 1 0-2.6 8.4" />
+                      </svg>
+                    </button>
+                    <button aria-label="Crop" title="Crop" disabled={busy} onClick={() => startCrop(i)}>
+                      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M6 2v16h16M2 6h16v16" />
+                      </svg>
+                    </button>
+                    <button className="danger" aria-label="Remove page" title="Remove page" disabled={busy || pdf.numPages < 2} onClick={() => void removePages([i])}>
+                      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" />
+                      </svg>
+                    </button>
+                  </div>
+                  <span className="page-num">{i + 1}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : pdf ? (
           <div
             ref={pageBox}
             className={`page tool-${tool} ${zoom !== 1 ? "zoomed" : ""}`}
@@ -1458,6 +2039,40 @@ export default function App() {
                 }
               }}
             />
+
+            {viewport && cropRect && (
+              <div
+                className="crop-layer"
+                onPointerDown={cropPointerDown}
+                onPointerMove={cropPointerMove}
+                onPointerUp={cropPointerUp}
+                onPointerCancel={cropPointerUp}
+              >
+                <div
+                  className="crop-rect"
+                  style={{
+                    left: pct(cropRect.x, viewport.width),
+                    top: pct(cropRect.y, viewport.height),
+                    width: pct(cropRect.w, viewport.width),
+                    height: pct(cropRect.h, viewport.height),
+                  }}
+                >
+                  {(["nw", "ne", "sw", "se"] as Handle[]).map((h) => (
+                    <div key={h} className={`handle ${h}`} data-handle={h} />
+                  ))}
+                </div>
+                <div className="floatbar crop-bar" role="toolbar" onPointerDown={(event) => event.stopPropagation()}>
+                  <span className="crop-label">
+                    Crop page {pageNumber} · {Math.round(cropRect.w / 1.25)} × {Math.round(cropRect.h / 1.25)} pt
+                  </span>
+                  <span className="sep" />
+                  <button onClick={() => setCropRect(null)}>Cancel</button>
+                  <button className="primary" disabled={busy} onClick={() => void applyCrop()}>
+                    Apply
+                  </button>
+                </div>
+              </div>
+            )}
 
             {viewport && selected && selectedRect && !editing && (
               <div
