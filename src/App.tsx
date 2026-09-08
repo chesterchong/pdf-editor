@@ -710,7 +710,7 @@ export default function App() {
       setAnnotations({});
       history.current = {};
       future.current = {};
-      setStatus("PDF ready. Pick a tool, or click an item to move or resize it.");
+      setStatus("");
     } catch (error) {
       setStatus(`Could not open PDF: ${message(error)}`);
     } finally {
