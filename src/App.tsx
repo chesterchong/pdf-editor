@@ -5,7 +5,7 @@ import type {
   PointerEvent as ReactPointerEvent,
   ReactNode,
 } from "react";
-import { getDocument, GlobalWorkerOptions, RenderingCancelledException } from "pdfjs-dist";
+import { getDocument, GlobalWorkerOptions, OPS, RenderingCancelledException } from "pdfjs-dist";
 import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
@@ -33,7 +33,7 @@ const DEFAULT_HIGHLIGHT = "#fff3a3";
 
 type Point = { x: number; y: number };
 type Rect = { x: number; y: number; w: number; h: number };
-type Tool = "select" | "text" | "draw" | "highlight" | "sign" | "image";
+type Tool = "select" | "text" | "draw" | "highlight" | "sign" | "image" | "edit";
 
 type Stroke = {
   kind: "stroke";
@@ -74,9 +74,45 @@ type ImageItem = {
   height: number;
   image: HTMLImageElement;
 };
-type Item = Stroke | Highlight | TextItem | ImageItem;
+/** Opaque patch that hides original page content underneath an edited copy. */
+type Cover = {
+  kind: "cover";
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
+};
+type Item = Stroke | Highlight | TextItem | ImageItem | Cover;
 
-type Line = { y0: number; y1: number; x0: number; x1: number };
+type Watermark = {
+  text: string;
+  color: string;
+  size: number;
+  opacity: number;
+  angle: number;
+  layout: "tile" | "center";
+};
+const DEFAULT_WATERMARK: Watermark = { text: "CONFIDENTIAL", color: "#f43f5e", size: 28, opacity: 0.25, angle: -30, layout: "tile" };
+const WATERMARK_COLORS = ["#f43f5e", "#2563eb", "#16a34a", "#d97706", "#7c3aed", "#172033"];
+
+/** Something on the original page the Edit tool can lift into an item. */
+type Region = { kind: "text"; rect: Rect; line: Line } | { kind: "image"; rect: Rect };
+type FontInfo = { family: string; bold: boolean; italic: boolean };
+
+type Line = {
+  y0: number;
+  y1: number;
+  x0: number;
+  x1: number;
+  /** Present when the row carries readable text (from the PDF or OCR). */
+  text?: string;
+  size?: number;
+  font?: string;
+  bold?: boolean;
+  italic?: boolean;
+};
 
 type Handle = "nw" | "ne" | "sw" | "se" | "e" | "w";
 type Drag =
@@ -106,7 +142,7 @@ function exportFilename(raw: string): string {
 
 const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl+";
 /** Rail order; also the 1–6 keyboard shortcuts. */
-const TOOL_ORDER: Tool[] = ["select", "text", "draw", "highlight", "sign", "image"];
+const TOOL_ORDER: Tool[] = ["select", "text", "draw", "highlight", "sign", "image", "edit"];
 
 /** Tools with a fly-out panel. The Text and Signature panels double as an
  * inspector: while a matching item is selected they edit that item. */
@@ -194,7 +230,7 @@ function itemRect(item: Item): Rect {
   if (item.kind === "text") {
     return { x: item.x, y: item.y, w: item.width, h: layoutText(item).height };
   }
-  if (item.kind === "image") {
+  if (item.kind === "image" || item.kind === "cover") {
     return { x: item.x, y: item.y, w: item.width, h: item.height };
   }
   if (item.kind === "highlight") {
@@ -233,12 +269,41 @@ function roundRect(ctx: CanvasRenderingContext2D, r: Rect, radius: number) {
   ctx.closePath();
 }
 
+function paintWatermark(ctx: CanvasRenderingContext2D, viewport: PageViewport, wm: Watermark) {
+  const text = wm.text.trim();
+  if (!text) return;
+  ctx.save();
+  ctx.globalAlpha = wm.opacity;
+  ctx.fillStyle = wm.color;
+  ctx.font = `700 ${wm.size}px Inter, system-ui, -apple-system, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const W = viewport.width;
+  const H = viewport.height;
+  ctx.translate(W / 2, H / 2);
+  ctx.rotate((wm.angle * Math.PI) / 180);
+  if (wm.layout === "center") {
+    ctx.fillText(text, 0, 0);
+  } else {
+    const stepX = ctx.measureText(text).width + wm.size * 2.5;
+    const stepY = wm.size * 4;
+    const reach = Math.hypot(W, H) / 2 + stepX;
+    let row = 0;
+    for (let y = -reach; y <= reach; y += stepY, row++) {
+      const offset = row % 2 ? stepX / 2 : 0;
+      for (let x = -reach + offset; x <= reach; x += stepX) ctx.fillText(text, x, y);
+    }
+  }
+  ctx.restore();
+}
+
 function paint(
   canvas: HTMLCanvasElement,
   viewport: PageViewport,
   items: Item[],
   skipId: string | null = null,
   layer: PaintLayer = "marks",
+  watermark: Watermark | null = null,
 ) {
   // Higher-resolution transparent overlay for crisp exports.
   const density = 2;
@@ -255,6 +320,8 @@ function paint(
     0,
   );
   if (layer === "highlights") {
+    // The watermark shares this multiply-blended layer so it sits behind the ink.
+    if (watermark) paintWatermark(ctx, viewport, watermark);
     // Opaque fills: overlapping strokes never stack up, and the multiply blend
     // applied by the caller keeps the text beneath fully legible.
     for (const item of items) {
@@ -267,8 +334,14 @@ function paint(
     }
     return;
   }
+  // Covers first: they hide original page content under edited copies.
   for (const item of items) {
-    if (item.id === skipId || item.kind === "highlight") continue;
+    if (item.kind !== "cover" || item.id === skipId) continue;
+    ctx.fillStyle = item.color;
+    ctx.fillRect(item.x, item.y, item.width, item.height);
+  }
+  for (const item of items) {
+    if (item.id === skipId || item.kind === "highlight" || item.kind === "cover") continue;
     ctx.save();
     if (item.kind === "text") {
       const { lines, lineHeight } = layoutText(item);
@@ -327,11 +400,14 @@ type RawTextItem = {
   transform: number[];
   width: number;
   height: number;
+  fontName?: string;
 };
 
-/** Group the page's text runs into visual rows (viewport coordinates). */
-function buildLines(raw: unknown[], view: PageViewport): Line[] {
-  const boxes: Rect[] = [];
+/** Group the page's text runs into visual rows (viewport coordinates), keeping
+ * the row's text and a best-guess font so the Edit tool can lift it. */
+function buildLines(raw: unknown[], view: PageViewport, fontOf: (name: string) => FontInfo): Line[] {
+  type Piece = { box: Rect; str: string; font: FontInfo };
+  const pieces: Piece[] = [];
   for (const it of raw) {
     const t = it as Partial<RawTextItem>;
     if (typeof t.str !== "string" || !t.str.trim() || !t.transform) continue;
@@ -347,9 +423,9 @@ function buildLines(raw: unknown[], view: PageViewport): Line[] {
       x1 = -Infinity,
       y1 = -Infinity;
     for (const tt of [0, 1]) {
-      for (const s of [-0.22, 0.9]) {
-        const px = e + dir[0] * w * tt + up[0] * h * s;
-        const py = f + dir[1] * w * tt + up[1] * h * s;
+      for (const sc of [-0.22, 0.9]) {
+        const px = e + dir[0] * w * tt + up[0] * h * sc;
+        const py = f + dir[1] * w * tt + up[1] * h * sc;
         const [vx, vy] = view.convertToViewportPoint(px, py);
         x0 = Math.min(x0, vx);
         y0 = Math.min(y0, vy);
@@ -358,27 +434,130 @@ function buildLines(raw: unknown[], view: PageViewport): Line[] {
       }
     }
     if (x1 - x0 < 0.5 || y1 - y0 < 0.5) continue;
-    boxes.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+    pieces.push({ box: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, str: t.str, font: fontOf(t.fontName ?? "") });
   }
-  boxes.sort((p, q) => p.y + p.h / 2 - (q.y + q.h / 2));
-  const lines: Line[] = [];
-  let current: Line | null = null;
+  pieces.sort((p, q) => p.box.y + p.box.h / 2 - (q.box.y + q.box.h / 2));
+  const rows: { line: Line; pieces: Piece[] }[] = [];
+  let current: { line: Line; pieces: Piece[] } | null = null;
   let currentCy = 0;
-  for (const b of boxes) {
+  for (const piece of pieces) {
+    const b = piece.box;
     const cy = b.y + b.h / 2;
-    if (current && Math.abs(cy - currentCy) < Math.max(b.h, current.y1 - current.y0) * 0.5) {
-      current.x0 = Math.min(current.x0, b.x);
-      current.x1 = Math.max(current.x1, b.x + b.w);
-      current.y0 = Math.min(current.y0, b.y);
-      current.y1 = Math.max(current.y1, b.y + b.h);
-      currentCy = (current.y0 + current.y1) / 2;
+    if (current && Math.abs(cy - currentCy) < Math.max(b.h, current.line.y1 - current.line.y0) * 0.5) {
+      current.line.x0 = Math.min(current.line.x0, b.x);
+      current.line.x1 = Math.max(current.line.x1, b.x + b.w);
+      current.line.y0 = Math.min(current.line.y0, b.y);
+      current.line.y1 = Math.max(current.line.y1, b.y + b.h);
+      current.pieces.push(piece);
+      currentCy = (current.line.y0 + current.line.y1) / 2;
     } else {
-      current = { x0: b.x, x1: b.x + b.w, y0: b.y, y1: b.y + b.h };
+      current = { line: { x0: b.x, x1: b.x + b.w, y0: b.y, y1: b.y + b.h }, pieces: [piece] };
       currentCy = cy;
-      lines.push(current);
+      rows.push(current);
     }
   }
-  return lines;
+  return rows.map(({ line, pieces: ps }) => {
+    ps.sort((p, q) => p.box.x - q.box.x);
+    const size = (line.y1 - line.y0) / 1.12;
+    let text = "";
+    let cursor = -Infinity;
+    for (const p of ps) {
+      const gap = p.box.x - cursor;
+      if (text && gap > size * 0.15 && !text.endsWith(" ") && !p.str.startsWith(" ")) text += " ";
+      text += p.str;
+      cursor = p.box.x + p.box.w;
+    }
+    const dominant = ps.reduce((best, p) => (p.str.length > best.str.length ? p : best), ps[0]);
+    text = text.replace(/\s+/g, " ").trim();
+    return { ...line, text, size, font: dominant.font.family, bold: dominant.font.bold, italic: dominant.font.italic };
+  });
+}
+
+/** Bounding boxes (viewport coordinates) of the images drawn on a page. */
+async function findImageRegions(page: PDFPageProxy, view: PageViewport): Promise<Rect[]> {
+  const ops = await page.getOperatorList();
+  const mul = (m: number[], c: number[]) => [
+    m[0] * c[0] + m[1] * c[2],
+    m[0] * c[1] + m[1] * c[3],
+    m[2] * c[0] + m[3] * c[2],
+    m[2] * c[1] + m[3] * c[3],
+    m[4] * c[0] + m[5] * c[2] + c[4],
+    m[4] * c[1] + m[5] * c[3] + c[5],
+  ];
+  const O = OPS as unknown as Record<string, number>;
+  const imageOps = new Set(
+    ["paintImageXObject", "paintInlineImageXObject", "paintImageMaskXObject", "paintImageXObjectRepeat", "paintImageMaskXObjectRepeat"]
+      .map((k) => O[k])
+      .filter((v) => typeof v === "number"),
+  );
+  let ctm = [1, 0, 0, 1, 0, 0];
+  const stack: number[][] = [];
+  const rects: Rect[] = [];
+  for (let i = 0; i < ops.fnArray.length; i++) {
+    const fn = ops.fnArray[i];
+    const args = ops.argsArray[i] as unknown[];
+    if (fn === O.save) stack.push(ctm);
+    else if (fn === O.restore) ctm = stack.pop() ?? ctm;
+    else if (fn === O.transform) ctm = mul(args as number[], ctm);
+    else if (fn === O.paintFormXObjectBegin) {
+      stack.push(ctm);
+      const m = args[0] as number[] | null;
+      if (m) ctm = mul(m, ctm);
+    } else if (fn === O.paintFormXObjectEnd) ctm = stack.pop() ?? ctm;
+    else if (imageOps.has(fn)) {
+      const pts = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([x, y]) =>
+        view.convertToViewportPoint(ctm[0] * x + ctm[2] * y + ctm[4], ctm[1] * x + ctm[3] * y + ctm[5]),
+      );
+      const xs = pts.map((p) => p[0]);
+      const ys = pts.map((p) => p[1]);
+      const r = { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+      if (r.w > 4 && r.h > 4 && r.w <= view.width * 1.05 && r.h <= view.height * 1.05) rects.push(r);
+    }
+  }
+  return rects;
+}
+
+/** Ink and paper colours inside a region of the rendered page. */
+function sampleRegion(canvas: HTMLCanvasElement, view: PageViewport, r: Rect): { ink: string; paper: string } {
+  const fallback = { ink: "#172033", paper: "#ffffff" };
+  const ctx = canvas.getContext("2d");
+  if (!ctx || !canvas.width) return fallback;
+  const sx = canvas.width / view.width;
+  const sy = canvas.height / view.height;
+  const x = Math.max(0, Math.floor(r.x * sx));
+  const y = Math.max(0, Math.floor(r.y * sy));
+  const w = Math.max(1, Math.min(canvas.width - x, Math.ceil(r.w * sx)));
+  const h = Math.max(1, Math.min(canvas.height - y, Math.ceil(r.h * sy)));
+  const data = ctx.getImageData(x, y, w, h).data;
+  const hex = (c: number[]) => "#" + c.map((v) => Math.round(v).toString(16).padStart(2, "0")).join("");
+  const lum = (i: number) => 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  let dark = 0;
+  let darkL = Infinity;
+  const step = Math.max(1, Math.floor((w * h) / 30000));
+  for (let i = 0; i < data.length; i += 4 * step) {
+    const l = lum(i);
+    if (l < darkL) {
+      darkL = l;
+      dark = i;
+    }
+  }
+  // Paper: brightest common tone along the edges of the region.
+  const edge: number[] = [];
+  for (let px = 0; px < w; px++) edge.push(px * 4, ((h - 1) * w + px) * 4);
+  for (let py = 0; py < h; py++) edge.push(py * w * 4, (py * w + w - 1) * 4);
+  let paper = [255, 255, 255];
+  let best = -1;
+  for (const i of edge) {
+    const l = lum(i);
+    if (l > best) {
+      best = l;
+      paper = [data[i], data[i + 1], data[i + 2]];
+    }
+  }
+  return {
+    ink: darkL < 170 ? hex([data[dark], data[dark + 1], data[dark + 2]]) : fallback.ink,
+    paper: best >= 0 ? hex(paper) : fallback.paper,
+  };
 }
 
 /** Snap a drag from `a` to `b` onto the text rows it sweeps across. */
@@ -454,6 +633,7 @@ type DocState = {
   structHistory: StructSnapshot[];
   pageNumber: number;
   zoom: number;
+  watermark: Watermark | null;
 };
 type Doc = { id: string; name: string; tone: number; state: DocState };
 
@@ -473,7 +653,7 @@ function tabStyle(tone: number): CSSProperties {
 }
 
 function freshDocState(pdf: PDFDocumentProxy, source: Uint8Array, exportName: string, annotations: Annotations = {}): DocState {
-  return { pdf, source, exportName, annotations, history: {}, future: {}, structHistory: [], pageNumber: 1, zoom: 1 };
+  return { pdf, source, exportName, annotations, history: {}, future: {}, structHistory: [], pageNumber: 1, zoom: 1, watermark: null };
 }
 
 /** Move items to where they land after the page turns `delta` degrees clockwise.
@@ -492,6 +672,10 @@ function rotateItems(items: Item[], delta: number, W: number, H: number): Item[]
   return items.map((i) => {
     if (i.kind === "stroke") return { ...i, points: i.points.map(pt) };
     if (i.kind === "highlight") return { ...i, rects: i.rects.map(rect) };
+    if (i.kind === "cover") {
+      const r = rect({ x: i.x, y: i.y, w: i.width, h: i.height });
+      return { ...i, x: r.x, y: r.y, width: r.w, height: r.h };
+    }
     const r = itemRect(i);
     const c = pt({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
     return { ...i, x: c.x - r.w / 2, y: c.y - r.h / 2 };
@@ -566,6 +750,15 @@ export default function App() {
   const [signSize, setSignSize] = useState(36);
   const [signText, setSignText] = useState("");
   const [textStyle, setTextStyle] = useState({ bold: false, italic: false, underline: false, strike: false });
+  const [imageRegions, setImageRegions] = useState<Rect[]>([]);
+  const [hoverRegion, setHoverRegion] = useState<Rect | null>(null);
+  const hoverKey = useRef("");
+  const [ocr, setOcr] = useState({ running: false, progress: 0 });
+  // OCR results per page of the active file; cleared when the file or its pages change.
+  const ocrCache = useRef<Record<number, Line[]>>({});
+  const [watermark, setWatermark] = useState<Watermark | null>(null);
+  const [wmOpen, setWmOpen] = useState(false);
+  const wmRoot = useRef<HTMLDivElement>(null);
   const [font, setFont] = useState("Arial");
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   const [draft, setDraft] = useState<Item | null>(null);
@@ -618,6 +811,15 @@ export default function App() {
     window.addEventListener("pointerdown", onDown);
     return () => window.removeEventListener("pointerdown", onDown);
   }, [panelOpen]);
+
+  useEffect(() => {
+    if (!wmOpen) return;
+    function onDown(event: PointerEvent) {
+      if (!wmRoot.current?.contains(event.target as Node)) setWmOpen(false);
+    }
+    window.addEventListener("pointerdown", onDown);
+    return () => window.removeEventListener("pointerdown", onDown);
+  }, [wmOpen]);
 
   /** Rasterise the page into the canvas, sharp enough for the current zoom. */
   async function drawBitmap(
@@ -684,7 +886,27 @@ export default function App() {
         lastViewport.current = view;
         setViewport(view);
         const content = await page.getTextContent();
-        if (!cancelled) setTextLines(buildLines(content.items, view));
+        const fontOf = (name: string): FontInfo => {
+          let f: { name?: string; isSerifFont?: boolean; isMonospace?: boolean } | null = null;
+          try {
+            f = name && page.commonObjs.has(name) ? page.commonObjs.get(name) : null;
+          } catch {
+            f = null;
+          }
+          const nm = (f?.name ?? "").toLowerCase();
+          return {
+            bold: /bold|black|heavy|semibold|demibold/.test(nm),
+            italic: /italic|oblique/.test(nm),
+            family:
+              f?.isMonospace || /courier|mono/.test(nm)
+                ? "Courier New"
+                : f?.isSerifFont || /times|georgia|serif|garamond|book|roman/.test(nm)
+                  ? "Times New Roman"
+                  : "Arial",
+          };
+        };
+        const lines = buildLines(content.items, view, fontOf);
+        if (!cancelled) setTextLines(lines.length ? lines : (ocrCache.current[pageNumber] ?? lines));
       } catch (error) {
         if (cancelled || error instanceof RenderingCancelledException) return;
         setStatus(`Preview error: ${message(error)}`);
@@ -744,6 +966,24 @@ export default function App() {
     return () => box.removeEventListener("wheel", onWheel);
   }, []);
 
+  // The Edit tool needs to know where the page's images are.
+  useEffect(() => {
+    setImageRegions([]);
+    setHoverRegion(null);
+    hoverKey.current = "";
+    const page = pageProxy.current;
+    if (tool !== "edit" || !viewport || !page) return;
+    let cancelled = false;
+    findImageRegions(page, viewport)
+      .then((rects) => {
+        if (!cancelled) setImageRegions(rects);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [tool, viewport]);
+
   // Start a crop once the page it targets has rendered.
   useEffect(() => {
     if (!cropPending || !viewport) return;
@@ -757,7 +997,7 @@ export default function App() {
     if (!viewport || !overlayCanvas.current) return;
     const canvas = overlayCanvas.current;
     const all = draft ? [...items, draft] : items;
-    if (highlightCanvas.current) paint(highlightCanvas.current, viewport, all, editingId, "highlights");
+    if (highlightCanvas.current) paint(highlightCanvas.current, viewport, all, editingId, "highlights", watermark);
     paint(canvas, viewport, all, editingId, "marks");
     const fonts = all.filter((i): i is TextItem => i.kind === "text");
     if (!fonts.length) return;
@@ -770,7 +1010,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [viewport, items, draft, editingId]);
+  }, [viewport, items, draft, editingId, watermark]);
 
   // Track how much the page is scaled down by CSS (narrow screens).
   useEffect(() => {
@@ -958,6 +1198,7 @@ export default function App() {
           h: "highlight",
           s: "sign",
           i: "image",
+          e: "edit",
         };
         // Digits pick tools in rail order: 1 Select, 2 Text, 3 Draw, ...
         const next = byKey[key] ?? TOOL_ORDER[Number(key) - 1];
@@ -1067,6 +1308,7 @@ export default function App() {
       structHistory: structHistory.current,
       pageNumber,
       zoom,
+      watermark,
     };
   }
 
@@ -1080,6 +1322,8 @@ export default function App() {
     structHistory.current = state.structHistory;
     setPageNumber(state.pageNumber);
     setZoom(state.zoom);
+    setWatermark(state.watermark);
+    ocrCache.current = {};
     setSelectedId(null);
     setEditingId(null);
     setSelectedPages(new Set());
@@ -1125,6 +1369,8 @@ export default function App() {
       history.current = {};
       future.current = {};
       structHistory.current = [];
+      ocrCache.current = {};
+      setWatermark(null);
       setActiveDocId(null);
       setOrganizing(false);
       setCropRect(null);
@@ -1172,6 +1418,7 @@ export default function App() {
       // Per-page item history no longer lines up with the pages; start fresh.
       history.current = {};
       future.current = {};
+      ocrCache.current = {};
       setPageNumber(Math.min(Math.max(1, nextPage ?? pageNumber), nextPdf.numPages));
       setSelectedId(null);
       setSelectedPages(new Set());
@@ -1407,6 +1654,130 @@ export default function App() {
     event.currentTarget.setPointerCapture(event.pointerId);
   }
 
+  /** Page content under a point that the Edit tool can lift; text wins over images. */
+  function findRegion(p: Point): Region | null {
+    for (const line of textLines) {
+      if (!line.text) continue;
+      const rect = { x: line.x0, y: line.y0, w: line.x1 - line.x0, h: line.y1 - line.y0 };
+      if (inRect(p, rect)) return { kind: "text", rect, line };
+    }
+    for (const rect of imageRegions) if (inRect(p, rect)) return { kind: "image", rect };
+    return null;
+  }
+
+  /** Cover the original text and put an editable copy on top. */
+  function liftText(line: Line) {
+    const canvas = pageCanvas.current;
+    if (!viewport || !canvas || !line.text) return;
+    const r = { x: line.x0, y: line.y0, w: line.x1 - line.x0, h: line.y1 - line.y0 };
+    const { ink, paper } = sampleRegion(canvas, viewport, r);
+    const size = line.size ?? r.h / 1.12;
+    const cover: Cover = { kind: "cover", id: uid(), x: r.x - 2, y: r.y - 1, width: r.w + 4, height: r.h + 2, color: paper };
+    const item: TextItem = {
+      kind: "text",
+      id: uid(),
+      x: r.x,
+      y: r.y - size * 0.15,
+      width: r.w,
+      text: line.text,
+      color: ink,
+      size,
+      font: line.font ?? "Arial",
+      bold: !!line.bold,
+      italic: !!line.italic,
+      underline: false,
+      strike: false,
+    };
+    // Wide enough that the copy never wraps where the original did not.
+    measureCtx.font = fontString(item);
+    item.width = Math.max(r.w, Math.ceil(measureCtx.measureText(item.text).width) + size * 0.6);
+    setItems([...(itemsRef.current[pageNumber] ?? []), cover, item]);
+    setSelectedId(item.id);
+    setStatus("Text lifted · drag to move, double-click to retype");
+  }
+
+  /** Cover the original image and put a movable copy (cut from the render) on top. */
+  async function liftImage(r: Rect) {
+    const canvas = pageCanvas.current;
+    if (!viewport || !canvas) return;
+    const sx = canvas.width / viewport.width;
+    const sy = canvas.height / viewport.height;
+    const crop = document.createElement("canvas");
+    crop.width = Math.max(1, Math.round(r.w * sx));
+    crop.height = Math.max(1, Math.round(r.h * sy));
+    crop.getContext("2d")?.drawImage(canvas, r.x * sx, r.y * sy, r.w * sx, r.h * sy, 0, 0, crop.width, crop.height);
+    const image = new Image();
+    image.src = crop.toDataURL("image/png");
+    try {
+      await image.decode();
+    } catch {
+      setStatus("Could not lift that image");
+      return;
+    }
+    const ring = { x: r.x - 3, y: r.y - 3, w: r.w + 6, h: r.h + 6 };
+    const { paper } = sampleRegion(canvas, viewport, ring);
+    const cover: Cover = { kind: "cover", id: uid(), x: r.x - 1, y: r.y - 1, width: r.w + 2, height: r.h + 2, color: paper };
+    const item: ImageItem = { kind: "image", id: uid(), x: r.x, y: r.y, width: r.w, height: r.h, image };
+    setItems([...(itemsRef.current[pageNumber] ?? []), cover, item]);
+    setSelectedId(item.id);
+    setStatus("Image lifted · drag to move, corner to resize");
+  }
+
+  /** Recognise text on the current page, on this device, for scanned PDFs. */
+  async function runOcr() {
+    const page = pageProxy.current;
+    if (!page || !viewport || ocr.running) return;
+    const targetPage = pageNumber;
+    setOcr({ running: true, progress: 0 });
+    setStatus("Recognizing text…");
+    try {
+      const scale = 2; // relative to the 1.25 viewport → about 180 dpi
+      const view = page.getViewport({ scale: 1.25 * scale });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.ceil(view.width);
+      canvas.height = Math.ceil(view.height);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Canvas is unavailable.");
+      // Print intent renders without animation frames, so it also works while hidden.
+      await page.render({ canvas, canvasContext: ctx, viewport: view, intent: "print" }).promise;
+      const { createWorker } = await import("tesseract.js");
+      const worker = await createWorker("eng", 1, {
+        workerPath: "/ocr/worker.min.js",
+        corePath: "/ocr/core",
+        langPath: "/ocr/lang",
+        gzip: true,
+        logger: (m: { status?: string; progress?: number }) => {
+          if (m.status === "recognizing text") setOcr({ running: true, progress: Math.round((m.progress ?? 0) * 100) });
+        },
+      });
+      const result = await worker.recognize(canvas, {}, { blocks: true });
+      await worker.terminate();
+      const lines: Line[] = [];
+      for (const block of result.data.blocks ?? []) {
+        for (const para of block.paragraphs) {
+          for (const ln of para.lines) {
+            const text = ln.text.replace(/\s+/g, " ").trim();
+            if (!text) continue;
+            const b = ln.bbox;
+            const line: Line = { x0: b.x0 / scale, x1: b.x1 / scale, y0: b.y0 / scale, y1: b.y1 / scale, text };
+            line.size = (line.y1 - line.y0) / 1.2;
+            line.font = "Arial";
+            lines.push(line);
+          }
+        }
+      }
+      canvas.width = 0;
+      canvas.height = 0;
+      ocrCache.current[targetPage] = lines;
+      if (pageNumber === targetPage) setTextLines(lines);
+      setStatus(lines.length ? `Text recognized · ${lines.length} lines` : "No text recognized on this page");
+    } catch (error) {
+      setStatus(`Text recognition failed: ${message(error)}`);
+    } finally {
+      setOcr({ running: false, progress: 0 });
+    }
+  }
+
   function pointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
     if (!viewport || busy || event.button !== 0 || !event.isPrimary) return;
     // Stop the browser's mousedown focus change from blurring a text box we
@@ -1415,6 +1786,19 @@ export default function App() {
     const p = point(event);
     if (editingId) {
       finishEditing();
+      return;
+    }
+    if (tool === "edit") {
+      const hit = hitTest(p);
+      if (hit) {
+        setSelectedId(hit.id);
+        startMove(hit, p, event);
+        return;
+      }
+      const region = findRegion(p);
+      if (region?.kind === "text") liftText(region.line);
+      else if (region) void liftImage(region.rect);
+      else setSelectedId(null);
       return;
     }
     if (tool === "select" || tool === "text" || tool === "image" || tool === "sign") {
@@ -1547,6 +1931,14 @@ export default function App() {
 
   function pointerMove(event: ReactPointerEvent<Element>) {
     const d = drag.current;
+    if (tool === "edit" && !d && viewport) {
+      const region = findRegion(point(event));
+      const key = region ? `${region.rect.x},${region.rect.y},${region.rect.w},${region.rect.h}` : "";
+      if (key !== hoverKey.current) {
+        hoverKey.current = key;
+        setHoverRegion(region?.rect ?? null);
+      }
+    }
     if (!d || !viewport || !event.isPrimary) return;
     const p = point(event);
     if (d.mode === "stroke") {
@@ -1642,11 +2034,15 @@ export default function App() {
         .filter((i): i is TextItem => i.kind === "text");
       await Promise.all(allText.map((i) => document.fonts.load(fontString(i))));
       const output = await PDFDocument.load(source.slice());
-      for (const [pageKey, pageItems] of Object.entries(itemsRef.current)) {
+      const pageKeys = watermark
+        ? Array.from({ length: pdf.numPages }, (_, i) => String(i + 1))
+        : Object.keys(itemsRef.current);
+      for (const pageKey of pageKeys) {
+        const pageItems = itemsRef.current[Number(pageKey)] ?? [];
         const drawable = pageItems.filter(
           (i) => i.kind !== "text" || i.text.trim(),
         );
-        if (!drawable.length) continue;
+        if (!drawable.length && !watermark) continue;
         const index = Number(pageKey);
         const originalPage = await pdf.getPage(index);
         const view = originalPage.getViewport({ scale: 1.25 });
@@ -1663,10 +2059,12 @@ export default function App() {
           ["marks", BlendMode.Normal],
         ];
         for (const [layer, blendMode] of layers) {
-          const hasContent = drawable.some((i) => (i.kind === "highlight") === (layer === "highlights"));
+          const hasContent =
+            drawable.some((i) => (i.kind === "highlight") === (layer === "highlights")) ||
+            (layer === "highlights" && !!watermark);
           if (!hasContent) continue;
           const canvas = document.createElement("canvas");
-          paint(canvas, view, drawable, null, layer);
+          paint(canvas, view, drawable, null, layer, layer === "highlights" ? watermark : null);
           const png = await output.embedPng(await (await canvasBlob(canvas)).arrayBuffer());
           canvas.width = 0;
           canvas.height = 0;
@@ -1738,6 +2136,7 @@ export default function App() {
     { id: "highlight", label: "Highlight", shortcut: "H", icon: icon("M9.5 14.5 5 19v1h4l3-3M8 14l7.5-7.5a2 2 0 0 1 3 3L11 17zM3 22h18") },
     { id: "sign", label: "Signature", shortcut: "S", icon: icon("M3 16c2.5-6 4.5-7 5.5-1 .7 4.5 2.5 3 4-1.5 1-3 2.5-2 3 1 .5 2.5 2 2 5.5-1M3 21h18") },
     { id: "image", label: "Image", shortcut: "I", icon: icon("M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4", <circle cx="16" cy="9" r="1.3" fill="currentColor" stroke="none" />) },
+    { id: "edit", label: "Edit content", shortcut: "E", icon: icon("M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17zM13.5 8.5l3 3M3 4h9") },
   ];
 
   return (
@@ -1869,7 +2268,9 @@ export default function App() {
             selected?.kind === "text" && ((isSign && selected.signature) || (isText && !selected.signature))
               ? selected
               : null;
-          const showPanel = !!opts && ((active && panelOpen) || !!bound);
+          const isEdit = t.id === "edit";
+          const hasPanel = !!opts || isEdit;
+          const showPanel = hasPanel && ((active && panelOpen) || !!bound);
           const current = bound ? bound.color : isHighlight ? highlightColor : color;
           const setCurrent = (c: string) => {
             if (bound) updateItem(bound.id, { color: c });
@@ -1897,19 +2298,44 @@ export default function App() {
               data-tip={`${t.label}  ·  ${index + 1}  ·  ${t.shortcut}`}
             >
               <button
-                className={`rail-btn ${active ? "active" : ""} ${opts ? "has-options" : ""}`}
+                className={`rail-btn ${active ? "active" : ""} ${hasPanel ? "has-options" : ""}`}
                 aria-label={t.label}
                 aria-pressed={active}
-                aria-expanded={opts ? showPanel : undefined}
+                aria-expanded={hasPanel ? showPanel : undefined}
                 disabled={busy}
                 onClick={() => {
                   pickTool(t.id);
-                  setPanelOpen(opts ? (active ? !panelOpen : true) : false);
+                  setWmOpen(false);
+                  setPanelOpen(hasPanel ? (active ? !panelOpen : true) : false);
                 }}
               >
                 {t.icon}
                 {opts && <span className="rail-dot" style={{ background: current }} />}
               </button>
+              {showPanel && isEdit && (
+                <div className="rail-pop tool-pop" role="dialog" aria-label="Edit content">
+                  <div className="tool-pop-title">Edit content</div>
+                  <p className="tool-pop-help">
+                    Click any text line or image on the page to lift it into an editable, movable copy.
+                    Double-click lifted text to retype it.
+                  </p>
+                  <div className="tool-pop-row">
+                    <span className="tool-pop-label">OCR</span>
+                    <button className="tool-pop-action" disabled={ocr.running || !pdf || busy} onClick={() => void runOcr()}>
+                      {ocr.running
+                        ? `Recognizing… ${ocr.progress}%`
+                        : textLines.some((l) => l.text)
+                          ? "Re-run text recognition"
+                          : "Recognize text on this page"}
+                    </button>
+                  </div>
+                  <p className="tool-pop-help small">
+                    {textLines.some((l) => l.text)
+                      ? `${textLines.filter((l) => l.text).length} text lines on this page${imageRegions.length ? ` · ${imageRegions.length} ${imageRegions.length === 1 ? "image" : "images"}` : ""}.`
+                      : "No selectable text on this page. For scans, run text recognition. It runs on your device; nothing is uploaded."}
+                  </p>
+                </div>
+              )}
               {showPanel && opts && (
                 <div
                   className="rail-pop tool-pop"
@@ -2056,6 +2482,102 @@ export default function App() {
           );
         })}
         <div className="rail-sep" />
+        <div className="rail-item low" ref={wmOpen ? wmRoot : undefined} data-tip="Watermark">
+          <button
+            className={`rail-btn has-options ${wmOpen ? "active" : ""}`}
+            aria-label="Watermark"
+            aria-expanded={wmOpen}
+            disabled={busy || !pdf}
+            onClick={() => {
+              setPanelOpen(false);
+              setWmOpen((o) => !o);
+            }}
+          >
+            {icon("M12 3s6 6.6 6 11a6 6 0 0 1-12 0c0-4.4 6-11 6-11z")}
+            {watermark && <span className="rail-dot" style={{ background: watermark.color }} />}
+          </button>
+          {wmOpen && (() => {
+            const wm = watermark ?? DEFAULT_WATERMARK;
+            const patch = (next: Partial<Watermark>) => setWatermark({ ...wm, ...next });
+            return (
+              <div className="rail-pop tool-pop" role="dialog" aria-label="Watermark">
+                <div className="tool-pop-title">
+                  Watermark
+                  <button
+                    className={`tool-pop-toggle ${watermark ? "on" : ""}`}
+                    onClick={() => {
+                      setWatermark(watermark ? null : DEFAULT_WATERMARK);
+                      setStatus(watermark ? "Watermark removed" : "Watermark added");
+                    }}
+                  >
+                    {watermark ? "Remove" : "Add"}
+                  </button>
+                </div>
+                <div className="tool-pop-row">
+                  <span className="tool-pop-label">Text</span>
+                  <input
+                    className="tool-pop-text plain"
+                    type="text"
+                    value={wm.text}
+                    placeholder="CONFIDENTIAL"
+                    aria-label="Watermark text"
+                    onChange={(event) => patch({ text: event.target.value })}
+                  />
+                </div>
+                <div className="tool-pop-row">
+                  <span className="tool-pop-label">Color</span>
+                  <div className="quick-colors">
+                    {WATERMARK_COLORS.map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        className={`quick-swatch ${c === wm.color.toLowerCase() ? "selected" : ""}`}
+                        style={{ background: c }}
+                        aria-label={c}
+                        aria-pressed={c === wm.color.toLowerCase()}
+                        onClick={() => patch({ color: c })}
+                      />
+                    ))}
+                    <ColorPicker label="Watermark color" value={wm.color} defaultValue={DEFAULT_WATERMARK.color} onChange={(c) => patch({ color: c })} />
+                  </div>
+                </div>
+                <div className="tool-pop-row">
+                  <span className="tool-pop-label">Size</span>
+                  <input aria-label="Watermark size" type="range" min="12" max="120" value={wm.size} onChange={(event) => patch({ size: Number(event.target.value) })} />
+                  <input aria-label="Watermark size value" type="number" min="8" max="300" value={wm.size} onChange={(event) => patch({ size: Math.min(300, Math.max(8, Number(event.target.value) || 8)) })} />
+                </div>
+                <div className="tool-pop-row">
+                  <span className="tool-pop-label">Opacity</span>
+                  <input aria-label="Watermark opacity" type="range" min="5" max="100" value={Math.round(wm.opacity * 100)} onChange={(event) => patch({ opacity: Number(event.target.value) / 100 })} />
+                  <input aria-label="Watermark opacity value" type="number" min="5" max="100" value={Math.round(wm.opacity * 100)} onChange={(event) => patch({ opacity: Math.min(100, Math.max(5, Number(event.target.value) || 5)) / 100 })} />
+                </div>
+                <div className="tool-pop-row">
+                  <span className="tool-pop-label">Angle</span>
+                  <input aria-label="Watermark angle" type="range" min="-90" max="90" value={wm.angle} onChange={(event) => patch({ angle: Number(event.target.value) })} />
+                  <input aria-label="Watermark angle value" type="number" min="-90" max="90" value={wm.angle} onChange={(event) => patch({ angle: Math.min(90, Math.max(-90, Number(event.target.value) || 0)) })} />
+                </div>
+                <div className="tool-pop-row">
+                  <span className="tool-pop-label">Layout</span>
+                  <div className="tool-pop-seg" role="radiogroup" aria-label="Watermark layout">
+                    {(["tile", "center"] as const).map((layout) => (
+                      <button
+                        key={layout}
+                        type="button"
+                        role="radio"
+                        aria-checked={wm.layout === layout}
+                        className={wm.layout === layout ? "selected" : ""}
+                        onClick={() => patch({ layout })}
+                      >
+                        {layout === "tile" ? "Tiled" : "Centered"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <p className="tool-pop-help small">Applies to every page of this file and is included in the export.</p>
+              </div>
+            );
+          })()}
+        </div>
         <button
           className={`rail-btn ${organizing ? "active" : ""}`}
           aria-label="Organize pages"
@@ -2257,6 +2779,7 @@ export default function App() {
               style={{
                 visibility: viewport ? "visible" : "hidden",
                 pointerEvents: busy ? "none" : "auto",
+                cursor: tool === "edit" ? (hoverRegion ? "pointer" : "default") : undefined,
               }}
               onPointerDown={pointerDown}
               onPointerMove={pointerMove}
@@ -2271,6 +2794,18 @@ export default function App() {
                 }
               }}
             />
+
+            {tool === "edit" && hoverRegion && viewport && !cropRect && (
+              <div
+                className="edit-hover"
+                style={{
+                  left: pct(hoverRegion.x, viewport.width),
+                  top: pct(hoverRegion.y, viewport.height),
+                  width: pct(hoverRegion.w, viewport.width),
+                  height: pct(hoverRegion.h, viewport.height),
+                }}
+              />
+            )}
 
             {viewport && cropRect && (
               <div

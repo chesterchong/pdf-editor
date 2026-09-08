@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "postinstall": "node scripts/copy-ocr.mjs"
   },
   "dependencies": {
     "@fontsource/caveat": "^5.3.0",
@@ -17,7 +18,8 @@
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^6.3.289",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
