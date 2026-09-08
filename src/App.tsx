@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type {
   DragEvent as ReactDragEvent,
   PointerEvent as ReactPointerEvent,
+  ReactNode,
 } from "react";
 import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
 import type { PDFDocumentProxy, PageViewport } from "pdfjs-dist";
@@ -432,6 +433,17 @@ export default function App() {
   const pageBox = useRef<HTMLDivElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const sizeRoot = useRef<HTMLDivElement>(null);
+  const [sizeOpen, setSizeOpen] = useState(false);
+
+  useEffect(() => {
+    if (!sizeOpen) return;
+    function onDown(event: PointerEvent) {
+      if (!sizeRoot.current?.contains(event.target as Node)) setSizeOpen(false);
+    }
+    window.addEventListener("pointerdown", onDown);
+    return () => window.removeEventListener("pointerdown", onDown);
+  }, [sizeOpen]);
   const drag = useRef<Drag | null>(null);
   const itemsRef = useRef<Record<number, Item[]>>({});
   const history = useRef<Record<number, Item[][]>>({});
@@ -1072,28 +1084,66 @@ export default function App() {
   }
 
   const selectedRect = selected && viewport ? itemRect(selected) : null;
+  // Anchor the contextual toolbar above the selection (below it near the top
+  // edge), clamped to the page so it never causes layout to shift.
+  const barPos = (() => {
+    if (!viewport || !selected || !selectedRect) return null;
+    const barW = selected.kind === "text" ? 520 : 44;
+    const barH = 44;
+    const pageW = viewport.width * cssScale;
+    const cx = (selectedRect.x + selectedRect.w / 2) * cssScale;
+    const left = Math.min(Math.max(cx - barW / 2, 4), Math.max(4, pageW - barW - 4));
+    const above = selectedRect.y * cssScale - barH - 10;
+    const top = above >= 4 ? above : (selectedRect.y + selectedRect.h) * cssScale + 10;
+    return { left, top };
+  })();
   const editingLayout = editing ? layoutText(editing) : null;
 
-  const toolLabels: Record<Tool, string> = {
-    select: "Select",
-    text: "Text",
-    draw: "Draw",
-    highlight: "Highlight",
-    sign: "Signature",
-    image: "Image",
-  };
+  const PRIVACY =
+    "Your PDF, images, and signatures are processed entirely on your own computer, inside this browser tab. Nothing is uploaded, transmitted, or stored on any server, and the page makes no network requests after it loads. You can disconnect from the internet and keep working. Edits are kept in memory only until you save a copy.";
+
+  const icon = (d: string, extra?: ReactNode) => (
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d={d} />
+      {extra}
+    </svg>
+  );
+  const tools: { id: Tool; label: string; shortcut: string; icon: ReactNode }[] = [
+    { id: "select", label: "Select", shortcut: "V", icon: icon("M5 3.5 19 11l-6.2 1.6L9.5 19z") },
+    { id: "text", label: "Text", shortcut: "T", icon: icon("M5 7V4h14v3M12 4v16M9 20h6") },
+    { id: "draw", label: "Draw", shortcut: "D", icon: icon("M4 20l4.5-1L19 8.5a2.1 2.1 0 0 0-3-3L5.5 16zM14 7l3 3") },
+    { id: "highlight", label: "Highlight", shortcut: "H", icon: icon("M9.5 14.5 5 19v1h4l3-3M8 14l7.5-7.5a2 2 0 0 1 3 3L11 17zM3 22h18") },
+    { id: "sign", label: "Signature", shortcut: "S", icon: icon("M3 16c2.5-6 4.5-7 5.5-1 .7 4.5 2.5 3 4-1.5 1-3 2.5-2 3 1 .5 2.5 2 2 5.5-1M3 21h18") },
+    { id: "image", label: "Image", shortcut: "I", icon: icon("M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4", <circle cx="16" cy="9" r="1.3" fill="currentColor" stroke="none" />) },
+  ];
+  const sizeIcon = icon("M4 6h16", <><path d="M4 12h16" strokeWidth="2.6" /><path d="M4 18.5h16" strokeWidth="4" /></>);
 
   return (
-    <main onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
-      <header>
-        <h1>PDF Studio</h1>
-        <button
-          className="primary"
-          disabled={!pdf || busy}
-          onClick={() => void savePdf()}
-        >
-          {busy ? "Please wait…" : "Save PDF"}
-        </button>
+    <div
+      className={`app ${pdf ? "has-pdf" : ""}`}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={onDrop}
+    >
+      <header className="topbar">
+        <div className="brand">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round">
+            <path d="M7 3h7l5 5v13H7z" />
+            <path d="M14 3v5h5M10 13h5M10 17h5" strokeLinecap="round" />
+          </svg>
+          <span>PDF Studio</span>
+        </div>
+        <div className="topbar-right">
+          <span className="pill" title={PRIVACY}>
+            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="5" y="11" width="14" height="10" rx="2" />
+              <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+            </svg>
+            Processed locally, never uploaded
+          </span>
+          <button className="primary" disabled={!pdf || busy} onClick={() => void savePdf()}>
+            {busy ? "Please wait…" : "Save PDF"}
+          </button>
+        </div>
       </header>
 
       <input
@@ -1108,282 +1158,331 @@ export default function App() {
         }}
       />
 
-      <section className="toolbar" aria-label="PDF editing tools">
-        <div className="tools">
-          {(Object.keys(toolLabels) as Tool[]).map((value) => (
-            <button
-              key={value}
-              aria-pressed={tool === value}
-              className={tool === value ? "selected" : ""}
-              onClick={() => pickTool(value)}
-              disabled={busy}
-            >
-              {toolLabels[value]}
-            </button>
-          ))}
-        </div>
-        {tool === "highlight" ? (
-          <div className="control">
-            Highlight
+      <aside className="rail" aria-label="Tools">
+        {tools.map((t) => (
+          <button
+            key={t.id}
+            className={`rail-btn ${tool === t.id ? "active" : ""}`}
+            aria-label={t.label}
+            aria-pressed={tool === t.id}
+            data-tip={`${t.label}  ·  ${t.shortcut}`}
+            disabled={busy}
+            onClick={() => pickTool(t.id)}
+          >
+            {t.icon}
+          </button>
+        ))}
+        <div className="rail-sep" />
+        <div className="rail-item" data-tip={tool === "highlight" ? "Highlight color" : "Color"}>
+          {tool === "highlight" ? (
             <ColorPicker
               label="Highlight color"
               value={highlightColor}
               defaultValue={DEFAULT_HIGHLIGHT}
               onChange={setHighlightColor}
             />
-          </div>
-        ) : (
-          <div className="control">
-            Color
+          ) : (
             <ColorPicker
               label="Annotation color"
               value={color}
               defaultValue={DEFAULT_COLOR}
               onChange={(next) => {
                 setColor(next);
-                if (selected?.kind === "text") {
-                  updateItem(selected.id, { color: next });
+                if (selected?.kind === "text") updateItem(selected.id, { color: next });
+              }}
+            />
+          )}
+        </div>
+        <div className="rail-item" ref={sizeRoot} data-tip="Size">
+          <button
+            className={`rail-btn ${sizeOpen ? "active" : ""}`}
+            aria-label="Size"
+            aria-expanded={sizeOpen}
+            onClick={() => setSizeOpen((o) => !o)}
+          >
+            {sizeIcon}
+            <span className="rail-badge">{size}</span>
+          </button>
+          {sizeOpen && (
+            <div className="rail-pop" role="dialog" aria-label="Size">
+              <input
+                aria-label="Annotation size"
+                type="range"
+                min="6"
+                max="72"
+                value={size}
+                onChange={(event) => setSize(Number(event.target.value))}
+              />
+              <input
+                aria-label="Size value"
+                type="number"
+                min="6"
+                max="200"
+                value={size}
+                onChange={(event) =>
+                  setSize(Math.min(200, Math.max(1, Number(event.target.value) || 1)))
+                }
+              />
+            </div>
+          )}
+        </div>
+      </aside>
+
+      <section className="canvas">
+        {pdf ? (
+          <div
+            ref={pageBox}
+            className={`page tool-${tool}`}
+            style={{ width: viewport?.width || 800 }}
+          >
+            <canvas ref={pageCanvas} className="pdf-canvas" />
+            <canvas
+              ref={overlayCanvas}
+              className="overlay"
+              aria-label="PDF annotation surface"
+              style={{
+                visibility: viewport ? "visible" : "hidden",
+                pointerEvents: busy ? "none" : "auto",
+              }}
+              onPointerDown={pointerDown}
+              onPointerMove={pointerMove}
+              onPointerUp={pointerUp}
+              onPointerCancel={cancelDrag}
+              onDoubleClick={(event) => {
+                if (!viewport) return;
+                const hit = hitTest(point(event));
+                if (hit?.kind === "text") {
+                  setSelectedId(hit.id);
+                  setEditingId(hit.id);
                 }
               }}
             />
+
+            {viewport && selected && selectedRect && !editing && (
+              <div
+                className="selection"
+                style={{
+                  left: pct(selectedRect.x, viewport.width),
+                  top: pct(selectedRect.y, viewport.height),
+                  width: pct(selectedRect.w, viewport.width),
+                  height: pct(selectedRect.h, viewport.height),
+                }}
+              >
+                {(selected.kind === "image"
+                  ? (["nw", "ne", "sw", "se"] as Handle[])
+                  : (["nw", "ne", "sw", "se", "e", "w"] as Handle[])
+                ).map((h) => (
+                  <div
+                    key={h}
+                    className={`handle ${h}`}
+                    onPointerDown={handleDown(h)}
+                    onPointerMove={pointerMove}
+                    onPointerUp={pointerUp}
+                    onPointerCancel={cancelDrag}
+                  />
+                ))}
+              </div>
+            )}
+
+            {viewport && selected && selectedRect && barPos && (
+              <div
+                className="floatbar"
+                role="toolbar"
+                aria-label={selected.kind === "text" ? "Text formatting" : "Image options"}
+                style={{ left: barPos.left, top: barPos.top }}
+              >
+                {selected.kind === "text" && (
+                  <>
+                    <select
+                      aria-label="Font"
+                      value={selected.font}
+                      style={{ fontFamily: `"${selected.font}"` }}
+                      onChange={(event) => {
+                        setFont(event.target.value);
+                        updateItem(selected.id, { font: event.target.value });
+                      }}
+                    >
+                      {FONTS.map((f) => (
+                        <option key={f} value={f} style={{ fontFamily: `"${f}"` }}>
+                          {f}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      aria-label="Font size"
+                      className="num"
+                      type="number"
+                      min="4"
+                      max="200"
+                      value={Math.round(selected.size)}
+                      onChange={(event) =>
+                        updateItem(selected.id, {
+                          size: Math.min(200, Math.max(4, Number(event.target.value) || 4)),
+                        })
+                      }
+                    />
+                    <ColorPicker
+                      label="Text color"
+                      value={selected.color}
+                      defaultValue={DEFAULT_COLOR}
+                      onChange={(next) => updateItem(selected.id, { color: next })}
+                    />
+                    <span className="sep" />
+                    {(
+                      [
+                        ["bold", "B"],
+                        ["italic", "I"],
+                        ["underline", "U"],
+                        ["strike", "S"],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <button
+                        key={key}
+                        className={`fmt ${key} ${selected[key] ? "selected" : ""}`}
+                        aria-pressed={selected[key]}
+                        aria-label={key}
+                        onPointerDown={(event) => event.preventDefault()}
+                        onClick={() => updateItem(selected.id, { [key]: !selected[key] })}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                    <span className="sep" />
+                    {!editing && (
+                      <button
+                        className="icon"
+                        aria-label="Edit text"
+                        title="Edit text"
+                        onClick={() => setEditingId(selected.id)}
+                      >
+                        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                          <path
+                            fill="currentColor"
+                            d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"
+                          />
+                        </svg>
+                      </button>
+                    )}
+                  </>
+                )}
+                <button
+                  className="icon danger"
+                  aria-label="Delete"
+                  title="Delete"
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() => removeItem(selected.id)}
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                    <path
+                      fill="currentColor"
+                      d="M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"
+                    />
+                  </svg>
+                </button>
+              </div>
+            )}
+
+            {viewport && editing && editingLayout && (
+              <textarea
+                ref={textarea}
+                className="text-editor"
+                aria-label="Text content"
+                value={editing.text}
+                placeholder="Type here"
+                spellCheck={false}
+                style={{
+                  left: pct(editing.x, viewport.width),
+                  top: pct(editing.y, viewport.height),
+                  width: pct(editing.width, viewport.width),
+                  height: pct(editingLayout.height, viewport.height),
+                  fontFamily: `"${editing.font}", sans-serif`,
+                  fontSize: editing.size * cssScale,
+                  lineHeight: LINE_HEIGHT,
+                  fontWeight: editing.bold ? 700 : 400,
+                  fontStyle: editing.italic ? "italic" : "normal",
+                  textDecoration:
+                    [
+                      editing.underline ? "underline" : "",
+                      editing.strike ? "line-through" : "",
+                    ]
+                      .join(" ")
+                      .trim() || "none",
+                  color: editing.color,
+                }}
+                onChange={(event) =>
+                  updateItem(editing.id, { text: event.target.value }, false)
+                }
+                onFocus={() => pushHistory(itemsRef.current[pageNumber] ?? [])}
+                onBlur={finishEditing}
+              />
+            )}
+          </div>
+        ) : (
+          <div className="welcome">
+            <div
+              className="empty"
+              role="button"
+              tabIndex={0}
+              aria-label="Open a PDF"
+              onClick={() => fileInput.current?.click()}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  fileInput.current?.click();
+                }
+              }}
+            >
+              <svg viewBox="0 0 24 24" width="40" height="40" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 16V4M7 9l5-5 5 5" />
+                <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
+              </svg>
+              <p>
+                Click or drop a PDF here, or paste it with{" "}
+                <kbd>Ctrl</kbd>+<kbd>V</kbd> / <kbd>⌘</kbd>+<kbd>V</kbd>.
+              </p>
+            </div>
+            <p className="privacy">
+              <strong>Privacy notice.</strong> {PRIVACY}
+            </p>
           </div>
         )}
-        <label className="control">
-          {tool === "text" ? "Font size" : "Size"}
-          <input
-            aria-label="Annotation size"
-            type="range"
-            min="6"
-            max="72"
-            value={size}
-            onChange={(event) => setSize(Number(event.target.value))}
-          />
-          <span>{size}</span>
-        </label>
       </section>
 
-      {selected?.kind === "text" && (
-        <section className="panel props" aria-label="Text formatting">
-          <select
-            aria-label="Font"
-            value={selected.font}
-            style={{ fontFamily: `"${selected.font}"` }}
-            onChange={(event) => {
-              setFont(event.target.value);
-              updateItem(selected.id, { font: event.target.value });
-            }}
-          >
-            {FONTS.map((f) => (
-              <option key={f} value={f} style={{ fontFamily: `"${f}"` }}>
-                {f}
-              </option>
-            ))}
-          </select>
-          <input
-            aria-label="Font size"
-            className="num"
-            type="number"
-            min="4"
-            max="200"
-            value={Math.round(selected.size)}
-            onChange={(event) =>
-              updateItem(selected.id, {
-                size: Math.min(200, Math.max(4, Number(event.target.value) || 4)),
-              })
-            }
-          />
-          <ColorPicker
-            label="Text color"
-            value={selected.color}
-            defaultValue={DEFAULT_COLOR}
-            onChange={(next) => updateItem(selected.id, { color: next })}
-          />
-          {(
-            [
-              ["bold", "B"],
-              ["italic", "I"],
-              ["underline", "U"],
-              ["strike", "S"],
-            ] as const
-          ).map(([key, label]) => (
+      <nav className="bottombar" aria-label="Page navigation">
+        <p className="status" role="status">
+          {status}
+        </p>
+        {pdf && (
+          <div className="pages">
             <button
-              key={key}
-              className={`fmt ${key} ${selected[key] ? "selected" : ""}`}
-              aria-pressed={selected[key]}
-              aria-label={key}
-              onClick={() => updateItem(selected.id, { [key]: !selected[key] })}
-            >
-              {label}
-            </button>
-          ))}
-          <button onClick={() => setEditingId(selected.id)}>Edit text</button>
-          <button className="danger" onClick={() => removeItem(selected.id)}>
-            Delete
-          </button>
-        </section>
-      )}
-      {selected?.kind === "image" && (
-        <section className="panel props" aria-label="Image options">
-          <span className="hint">Drag the image to move it. Drag a corner to resize.</span>
-          <button className="danger" onClick={() => removeItem(selected.id)}>
-            Delete
-          </button>
-        </section>
-      )}
-
-      <p className="status" role="status">
-        {status}
-      </p>
-
-      {pdf ? (
-        <>
-          <nav className="pagination" aria-label="PDF pages">
-            <button
+              aria-label="Previous page"
               disabled={busy || pageNumber <= 1}
               onClick={() => setPageNumber((n) => n - 1)}
             >
-              Previous
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path fill="currentColor" d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z" />
+              </svg>
             </button>
             <span>
-              Page {pageNumber} of {pdf.numPages}
+              Page <strong>{pageNumber}</strong> of {pdf.numPages}
             </span>
             <button
+              aria-label="Next page"
               disabled={busy || pageNumber >= pdf.numPages}
               onClick={() => setPageNumber((n) => n + 1)}
             >
-              Next
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path fill="currentColor" d="M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z" />
+              </svg>
             </button>
-            <button
-              className="link"
-              disabled={busy}
-              onClick={() => fileInput.current?.click()}
-            >
-              Open another PDF
-            </button>
-          </nav>
-          <section className="workspace">
-            <div
-              ref={pageBox}
-              className={`page tool-${tool}`}
-              style={{ width: viewport?.width || 800 }}
-            >
-              <canvas ref={pageCanvas} className="pdf-canvas" />
-              <canvas
-                ref={overlayCanvas}
-                className="overlay"
-                aria-label="PDF annotation surface"
-                style={{
-                  visibility: viewport ? "visible" : "hidden",
-                  pointerEvents: busy ? "none" : "auto",
-                }}
-                onPointerDown={pointerDown}
-                onPointerMove={pointerMove}
-                onPointerUp={pointerUp}
-                onPointerCancel={cancelDrag}
-                onDoubleClick={(event) => {
-                  if (!viewport) return;
-                  const hit = hitTest(point(event));
-                  if (hit?.kind === "text") {
-                    setSelectedId(hit.id);
-                    setEditingId(hit.id);
-                  }
-                }}
-              />
-
-              {viewport && selected && selectedRect && !editing && (
-                <div
-                  className="selection"
-                  style={{
-                    left: pct(selectedRect.x, viewport.width),
-                    top: pct(selectedRect.y, viewport.height),
-                    width: pct(selectedRect.w, viewport.width),
-                    height: pct(selectedRect.h, viewport.height),
-                  }}
-                >
-                  {(selected.kind === "image"
-                    ? (["nw", "ne", "sw", "se"] as Handle[])
-                    : (["nw", "ne", "sw", "se", "e", "w"] as Handle[])
-                  ).map((h) => (
-                    <div
-                      key={h}
-                      className={`handle ${h}`}
-                      onPointerDown={handleDown(h)}
-                      onPointerMove={pointerMove}
-                      onPointerUp={pointerUp}
-                      onPointerCancel={cancelDrag}
-                    />
-                  ))}
-                </div>
-              )}
-
-              {viewport && editing && editingLayout && (
-                <textarea
-                  ref={textarea}
-                  className="text-editor"
-                  aria-label="Text content"
-                  value={editing.text}
-                  placeholder="Type here"
-                  spellCheck={false}
-                  style={{
-                    left: pct(editing.x, viewport.width),
-                    top: pct(editing.y, viewport.height),
-                    width: pct(editing.width, viewport.width),
-                    height: pct(editingLayout.height, viewport.height),
-                    fontFamily: `"${editing.font}", sans-serif`,
-                    fontSize: editing.size * cssScale,
-                    lineHeight: LINE_HEIGHT,
-                    fontWeight: editing.bold ? 700 : 400,
-                    fontStyle: editing.italic ? "italic" : "normal",
-                    textDecoration:
-                      [
-                        editing.underline ? "underline" : "",
-                        editing.strike ? "line-through" : "",
-                      ]
-                        .join(" ")
-                        .trim() || "none",
-                    color: editing.color,
-                  }}
-                  onChange={(event) =>
-                    updateItem(editing.id, { text: event.target.value }, false)
-                  }
-                  onFocus={() => pushHistory(itemsRef.current[pageNumber] ?? [])}
-                  onBlur={finishEditing}
-                />
-              )}
-            </div>
-          </section>
-        </>
-      ) : (
-        <section
-          className="empty"
-          role="button"
-          tabIndex={0}
-          aria-label="Open a PDF"
-          onClick={() => fileInput.current?.click()}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              fileInput.current?.click();
-            }
-          }}
-        >
-          <p>
-            Click or drop a PDF here, or paste it with{" "}
-            <kbd>Ctrl</kbd>+<kbd>V</kbd> / <kbd>⌘</kbd>+<kbd>V</kbd>.
-          </p>
-        </section>
-      )}
-
-      <footer>
-        <p className="privacy">
-          <strong>Privacy notice.</strong> This tool is built for confidential
-          documents. Your PDF, images, and signatures are processed entirely on
-          your own computer, inside this browser tab. Nothing is uploaded,
-          transmitted, or stored on any server, and the page makes no network
-          requests after it loads. You can disconnect from the internet and
-          keep working. Edits are kept in memory only until you save a copy.
-        </p>
-      </footer>
-    </main>
+          </div>
+        )}
+        {pdf && (
+          <button className="link" disabled={busy} onClick={() => fileInput.current?.click()}>
+            Open another PDF
+          </button>
+        )}
+      </nav>
+    </div>
   );
 }
