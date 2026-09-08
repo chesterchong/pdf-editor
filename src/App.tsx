@@ -1411,13 +1411,10 @@ export default function App() {
             }
           }}
         >
-          <h2>Your PDF, your workspace</h2>
-          <p className="cta">Click here to open a PDF</p>
           <p>
-            or drop a file onto this page, or paste it with{" "}
+            Click or drop a PDF here, or paste it with{" "}
             <kbd>Ctrl</kbd>+<kbd>V</kbd> / <kbd>⌘</kbd>+<kbd>V</kbd>.
           </p>
-          <p>No account, no upload, no server. Everything runs in this browser tab.</p>
         </section>
       )}
 

@@ -328,11 +328,6 @@ footer .privacy {
   background: #f5f8ff;
   outline: none;
 }
-.empty .cta {
-  color: #1d4ed8;
-  font-size: 18px;
-  font-weight: 600;
-}
 .empty kbd {
   padding: 1px 6px;
   border: 1px solid #cbd5e1;
