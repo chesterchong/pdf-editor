@@ -554,18 +554,32 @@ kbd {
   padding: 0 16px;
   border-top: 1px solid #17203314;
 }
-.bottombar .status {
+.bottombar-right {
   position: absolute;
-  left: 70px;
-  top: 50%;
-  max-width: 40%;
+  right: 12px;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  max-width: 55%;
+}
+.bottombar .status {
   margin: 0;
+  min-width: 0;
   color: #64748b;
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  transform: translateY(-50%);
+  text-align: right;
+  animation: status-in 0.2s ease-out;
+}
+@keyframes status-in {
+  from {
+    opacity: 0;
+    transform: translateX(4px);
+  }
 }
 .bottombar .pages {
   display: flex;
@@ -578,13 +592,10 @@ kbd {
   color: #172033;
 }
 .zoomctl {
-  position: absolute;
-  right: 12px;
-  top: 50%;
   display: flex;
+  flex: none;
   align-items: center;
   gap: 2px;
-  transform: translateY(-50%);
 }
 .zoomctl button {
   width: 28px;
@@ -654,17 +665,38 @@ kbd {
 .handle.ne { left: calc(100% + 5px); top: -5px; cursor: nesw-resize; }
 .handle.sw { left: -5px; top: calc(100% + 5px); cursor: nesw-resize; }
 .handle.se { left: calc(100% + 5px); top: calc(100% + 5px); cursor: nwse-resize; }
-/* Side edges: invisible strips along the frame, draggable to change width. */
+/* Side edges: a full-height drag strip that changes width only, with a small
+   pill at the midpoint so the affordance is visible. */
 .handle.e,
 .handle.w {
   top: 0;
-  width: 10px;
+  width: 14px;
   height: 100%;
   transform: translateX(-50%);
   cursor: ew-resize;
 }
 .handle.e { left: calc(100% + 5px); }
 .handle.w { left: -5px; }
+.handle.e::after,
+.handle.w::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 5px;
+  height: 18px;
+  border: 1.5px solid #2563eb;
+  border-radius: 3px;
+  background: white;
+  box-shadow: 0 1px 3px #17203340;
+  transform: translate(-50%, -50%);
+  transition: transform 0.1s, background 0.1s;
+}
+.handle.e:hover::after,
+.handle.w:hover::after {
+  background: #eaf0ff;
+  transform: translate(-50%, -50%) scale(1.15, 1.2);
+}
 
 /* Frosted-glass surface shared by the floating toolbar and popovers. */
 .floatbar,

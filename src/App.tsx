@@ -808,12 +808,6 @@ export default function App() {
     const pages = Object.entries(itemsRef.current).filter(([, list]) => list.length);
     const count = pages.reduce((n, [, list]) => n + list.length, 0);
     if (!count) return;
-    if (
-      !window.confirm(
-        `Remove ${count === 1 ? "the only annotation" : `all ${count} annotations`} from this document? You can undo per page with ${MOD}Z.`,
-      )
-    )
-      return;
     for (const [key, list] of pages) {
       const n = Number(key);
       history.current[n] = [...(history.current[n] ?? []).slice(-49), list];
@@ -822,7 +816,9 @@ export default function App() {
     setEditingId(null);
     setSelectedId(null);
     setAnnotations({});
-    setStatus("All annotations removed.");
+    setStatus(
+      `Removed ${count === 1 ? "1 annotation" : `${count} annotations`}. Undo on each page with ${MOD}Z.`,
+    );
   }
 
   function undo() {
@@ -1665,9 +1661,6 @@ export default function App() {
       </section>
 
       <nav className="bottombar" aria-label="Page navigation">
-        <p className="status" role="status">
-          {status}
-        </p>
         {pdf && (
           <div className="pages">
             <button
@@ -1693,7 +1686,11 @@ export default function App() {
             </button>
           </div>
         )}
-        {pdf && (
+        <div className="bottombar-right">
+          <p key={status} className="status" role="status" title={status}>
+            {status}
+          </p>
+          {pdf && (
           <div className="zoomctl" role="group" aria-label="Zoom">
             <button aria-label="Zoom out" disabled={zoom <= ZOOM_MIN} onClick={() => zoomBy(1 / ZOOM_STEP)}>
               <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -1709,7 +1706,8 @@ export default function App() {
               </svg>
             </button>
           </div>
-        )}
+          )}
+        </div>
       </nav>
     </div>
   );
