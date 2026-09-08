@@ -413,10 +413,84 @@ button.link:hover:not(:disabled) {
   padding: 12px 14px 14px;
 }
 .tool-pop-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 24px;
   color: #172033;
   font-size: 13px;
   font-weight: 600;
   letter-spacing: -0.1px;
+}
+.tool-pop-delete {
+  width: 26px;
+  min-height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #dc2626;
+}
+.tool-pop-delete:hover:not(:disabled) {
+  background: #dc26261a;
+}
+.tool-pop-select {
+  grid-column: 2 / -1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 28px 0 10px;
+  border: none;
+  border-radius: 8px;
+  background: #1720330f;
+  color: #172033;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 12px;
+  text-overflow: ellipsis;
+  transition: background-color 0.12s, box-shadow 0.12s;
+}
+.tool-pop-select:hover {
+  background-color: #17203318;
+}
+.tool-pop-select:focus-visible {
+  outline: none;
+  background-color: #17203318;
+  box-shadow: 0 0 0 2px #2563eb66;
+}
+.tool-pop-styles {
+  grid-column: 2 / -1;
+  display: flex;
+  gap: 4px;
+}
+.tool-pop-styles .fmt {
+  width: 34px;
+  min-height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: #1720330f;
+  color: #25324a;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 15px;
+  transition: background 0.12s, color 0.12s;
+}
+.tool-pop-styles .fmt:hover:not(:disabled) {
+  background: #17203318;
+}
+.tool-pop-styles .fmt.bold { font-weight: 800; }
+.tool-pop-styles .fmt.italic { font-style: italic; }
+.tool-pop-styles .fmt.underline { text-decoration: underline; text-underline-offset: 2px; }
+.tool-pop-styles .fmt.strike { text-decoration: line-through; }
+.tool-pop-styles .fmt.selected,
+.tool-pop-styles .fmt.selected:hover:not(:disabled) {
+  background: #172033;
+  color: white;
 }
 .tool-pop-row input[type="range"] {
   height: 4px;

@@ -29,7 +29,7 @@ import "./App.css";
 GlobalWorkerOptions.workerSrc = workerUrl;
 
 const DEFAULT_COLOR = "#1d4ed8";
-const DEFAULT_HIGHLIGHT = "#ffe95c";
+const DEFAULT_HIGHLIGHT = "#fff3a3";
 
 type Point = { x: number; y: number };
 type Rect = { x: number; y: number; w: number; h: number };
@@ -108,15 +108,17 @@ const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl+";
 /** Rail order; also the 1–6 keyboard shortcuts. */
 const TOOL_ORDER: Tool[] = ["select", "text", "draw", "highlight", "sign", "image"];
 
-/** Tools with a colour/size fly-out. Text is excluded: its floating toolbar
- * already covers font, size and colour once a box exists. */
+/** Tools with a fly-out panel. The Text and Signature panels double as an
+ * inspector: while a matching item is selected they edit that item. */
 const TOOL_OPTIONS: Partial<Record<Tool, { sizeLabel: string; min: number; max: number }>> = {
+  text: { sizeLabel: "Font size", min: 6, max: 72 },
   sign: { sizeLabel: "Size", min: 16, max: 96 },
   draw: { sizeLabel: "Thickness", min: 6, max: 72 },
   highlight: { sizeLabel: "Height", min: 6, max: 72 },
 };
 const QUICK_COLORS = ["#172033", "#1d4ed8", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#db2777", "#ffffff"];
-const QUICK_HIGHLIGHTS = ["#ffe95c", "#a7f3d0", "#bae6fd", "#fbcfe8", "#fed7aa", "#ddd6fe", "#fecaca", "#e2e8f0"];
+// Soft marker tints; they blend with multiply, so lighter means gentler.
+const QUICK_HIGHLIGHTS = ["#fff3a3", "#c9f5e3", "#cfeafe", "#fdddf0", "#fee4c4", "#e8e3fe", "#fedadb", "#e9edf4"];
 
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 4;
@@ -563,6 +565,7 @@ export default function App() {
   const [size, setSize] = useState(18);
   const [signSize, setSignSize] = useState(36);
   const [signText, setSignText] = useState("");
+  const [textStyle, setTextStyle] = useState({ bold: false, italic: false, underline: false, strike: false });
   const [font, setFont] = useState("Arial");
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   const [draft, setDraft] = useState<Item | null>(null);
@@ -1442,10 +1445,10 @@ export default function App() {
         size: textSize,
         font: sign ? SIGNATURE_FONT : font,
         signature: sign,
-        bold: false,
-        italic: false,
-        underline: false,
-        strike: false,
+        bold: !sign && textStyle.bold,
+        italic: !sign && textStyle.italic,
+        underline: !sign && textStyle.underline,
+        strike: !sign && textStyle.strike,
       };
       if (preset) {
         // A saved signature drops in ready-made: size the box to the text.
@@ -1860,22 +1863,44 @@ export default function App() {
           const active = tool === t.id;
           const isHighlight = t.id === "highlight";
           const isSign = t.id === "sign";
-          const current = isHighlight ? highlightColor : color;
-          const setCurrent = isHighlight ? setHighlightColor : setColor;
-          const sizeValue = isSign ? signSize : size;
-          const setSizeValue = isSign ? setSignSize : setSize;
+          const isText = t.id === "text";
+          // A selected text box (or signature) binds its panel to itself.
+          const bound =
+            selected?.kind === "text" && ((isSign && selected.signature) || (isText && !selected.signature))
+              ? selected
+              : null;
+          const showPanel = !!opts && ((active && panelOpen) || !!bound);
+          const current = bound ? bound.color : isHighlight ? highlightColor : color;
+          const setCurrent = (c: string) => {
+            if (bound) updateItem(bound.id, { color: c });
+            if (isHighlight) setHighlightColor(c);
+            else setColor(c);
+            if (bound) refocusEditor();
+          };
+          const sizeValue = bound ? Math.round(bound.size) : isSign ? signSize : size;
+          const setSizeValue = (v: number) => {
+            if (bound) updateItem(bound.id, { size: v });
+            if (isSign) setSignSize(v);
+            else setSize(v);
+          };
+          const fontValue = bound?.font ?? font;
+          const styleOf = (key: "bold" | "italic" | "underline" | "strike") => (bound ? bound[key] : textStyle[key]);
+          const toggleStyle = (key: "bold" | "italic" | "underline" | "strike") => {
+            if (bound) updateItem(bound.id, { [key]: !bound[key] });
+            else setTextStyle((st) => ({ ...st, [key]: !st[key] }));
+          };
           return (
             <div
               key={t.id}
               className="rail-item"
-              ref={active && opts ? panelRoot : undefined}
+              ref={showPanel ? panelRoot : undefined}
               data-tip={`${t.label}  ·  ${index + 1}  ·  ${t.shortcut}`}
             >
               <button
                 className={`rail-btn ${active ? "active" : ""} ${opts ? "has-options" : ""}`}
                 aria-label={t.label}
                 aria-pressed={active}
-                aria-expanded={opts ? active && panelOpen : undefined}
+                aria-expanded={opts ? showPanel : undefined}
                 disabled={busy}
                 onClick={() => {
                   pickTool(t.id);
@@ -1885,10 +1910,34 @@ export default function App() {
                 {t.icon}
                 {opts && <span className="rail-dot" style={{ background: current }} />}
               </button>
-              {active && opts && panelOpen && (
-                <div className="rail-pop tool-pop" role="dialog" aria-label={`${t.label} options`}>
-                  <div className="tool-pop-title">{t.label}</div>
-                  {isSign && (
+              {showPanel && opts && (
+                <div
+                  className="rail-pop tool-pop"
+                  role="dialog"
+                  aria-label={`${t.label} options`}
+                  ref={bound ? floatbar : undefined}
+                  onPointerDown={() => {
+                    // Keep an in-progress text box alive while its panel is used.
+                    barPress.current = true;
+                    window.setTimeout(() => (barPress.current = false), 0);
+                  }}
+                >
+                  <div className="tool-pop-title">
+                    {t.label}
+                    {bound && (
+                      <button
+                        className="tool-pop-delete"
+                        aria-label={isSign ? "Delete signature" : "Delete text"}
+                        title={isSign ? "Delete signature" : "Delete text"}
+                        onClick={() => removeItem(bound.id)}
+                      >
+                        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                  {isSign && !bound && (
                     <div className="tool-pop-row">
                       <span className="tool-pop-label">Text</span>
                       <input
@@ -1906,6 +1955,30 @@ export default function App() {
                       />
                     </div>
                   )}
+                  {isText && (
+                    <div className="tool-pop-row">
+                      <span className="tool-pop-label">Font</span>
+                      <select
+                        className="tool-pop-select"
+                        aria-label="Font"
+                        value={fontValue}
+                        style={{ fontFamily: `"${fontValue}"` }}
+                        onChange={(event) => {
+                          setFont(event.target.value);
+                          if (bound) {
+                            updateItem(bound.id, { font: event.target.value });
+                            refocusEditor();
+                          }
+                        }}
+                      >
+                        {FONTS.map((f) => (
+                          <option key={f} value={f} style={{ fontFamily: `"${f}"` }}>
+                            {f}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                   <div className="tool-pop-row">
                     <span className="tool-pop-label">Color</span>
                     <div className="quick-colors">
@@ -1921,7 +1994,7 @@ export default function App() {
                         />
                       ))}
                       <ColorPicker
-                        label={isHighlight ? "Highlight color" : "Annotation color"}
+                        label={isHighlight ? "Highlight color" : isText ? "Text color" : "Annotation color"}
                         value={current}
                         defaultValue={isHighlight ? DEFAULT_HIGHLIGHT : DEFAULT_COLOR}
                         onChange={setCurrent}
@@ -1949,6 +2022,34 @@ export default function App() {
                       }
                     />
                   </div>
+                  {isText && (
+                    <div className="tool-pop-row">
+                      <span className="tool-pop-label">Style</span>
+                      <div className="tool-pop-styles">
+                        {(
+                          [
+                            ["bold", "B"],
+                            ["italic", "I"],
+                            ["underline", "U"],
+                            ["strike", "S"],
+                          ] as const
+                        ).map(([key, label]) => (
+                          <button
+                            key={key}
+                            type="button"
+                            className={`fmt ${key} ${styleOf(key) ? "selected" : ""}`}
+                            aria-pressed={styleOf(key)}
+                            aria-label={key}
+                            title={`${key[0].toUpperCase()}${key.slice(1)}  ·  ${MOD}${key === "strike" ? "⇧X" : label}`}
+                            onPointerDown={(event) => event.preventDefault()}
+                            onClick={() => toggleStyle(key)}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -2233,7 +2334,7 @@ export default function App() {
               </div>
             )}
 
-            {viewport && selected && selectedRect && barPos && !(selected.kind === "text" && selected.signature) && (
+            {viewport && selected && selectedRect && barPos && selected.kind !== "text" && (
               <div
                 ref={floatbar}
                 className="floatbar"
@@ -2242,88 +2343,9 @@ export default function App() {
                   barPress.current = true;
                   window.setTimeout(() => (barPress.current = false), 0);
                 }}
-                aria-label={selected.kind === "text" ? "Text formatting" : "Image options"}
+                aria-label="Selection options"
                 style={{ left: barPos.left, top: barPos.top }}
               >
-                {selected.kind === "text" && (
-                  <>
-                    <select
-                      aria-label="Font"
-                      value={selected.font}
-                      style={{ fontFamily: `"${selected.font}"` }}
-                      onChange={(event) => {
-                        setFont(event.target.value);
-                        updateItem(selected.id, { font: event.target.value });
-                        refocusEditor();
-                      }}
-                    >
-                      {FONTS.map((f) => (
-                        <option key={f} value={f} style={{ fontFamily: `"${f}"` }}>
-                          {f}
-                        </option>
-                      ))}
-                    </select>
-                    <input
-                      aria-label="Font size"
-                      className="num"
-                      type="number"
-                      min="4"
-                      max="200"
-                      value={Math.round(selected.size)}
-                      onChange={(event) =>
-                        updateItem(selected.id, {
-                          size: Math.min(200, Math.max(4, Number(event.target.value) || 4)),
-                        })
-                      }
-                    />
-                    <ColorPicker
-                      label="Text color"
-                      value={selected.color}
-                      defaultValue={DEFAULT_COLOR}
-                      onChange={(next) => {
-                        updateItem(selected.id, { color: next });
-                        refocusEditor();
-                      }}
-                    />
-                    <span className="sep" />
-                    {(
-                      [
-                        ["bold", "B"],
-                        ["italic", "I"],
-                        ["underline", "U"],
-                        ["strike", "S"],
-                      ] as const
-                    ).map(([key, label]) => (
-                      <button
-                        key={key}
-                        className={`fmt ${key} ${selected[key] ? "selected" : ""}`}
-                        aria-pressed={selected[key]}
-                        aria-label={key}
-                        title={`${key[0].toUpperCase()}${key.slice(1)}  ·  ${MOD}${key === "strike" ? "⇧X" : label}`}
-                        onPointerDown={(event) => event.preventDefault()}
-                        onClick={() => updateItem(selected.id, { [key]: !selected[key] })}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                    <span className="sep" />
-                    {!editing && (
-                      <button
-                        className="icon"
-                        aria-label="Edit text"
-                        title="Edit text"
-                        onClick={() => setEditingId(selected.id)}
-                      >
-                        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-                          <path
-                            fill="currentColor"
-                            d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"
-                          />
-                        </svg>
-                      </button>
-                    )}
-                  </>
-                )}
                 <button
                   className="icon danger"
                   aria-label="Delete"
