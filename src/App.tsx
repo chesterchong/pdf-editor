@@ -550,6 +550,7 @@ export default function App() {
   const [highlightColor, setHighlightColor] = useState(DEFAULT_HIGHLIGHT);
   const [size, setSize] = useState(18);
   const [signSize, setSignSize] = useState(36);
+  const [signText, setSignText] = useState("");
   const [font, setFont] = useState("Arial");
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   const [draft, setDraft] = useState<Item | null>(null);
@@ -589,6 +590,8 @@ export default function App() {
   const zoomAnchor = useRef<{ x: number; y: number } | null>(null);
   const prevZoom = useRef(1);
   const pageProxy = useRef<PDFPageProxy | null>(null);
+  // Last known page size, so the sheet keeps its footprint while re-rendering.
+  const lastViewport = useRef<PageViewport | null>(null);
   const bitmapTask = useRef<ReturnType<PDFPageProxy["render"]> | null>(null);
 
   useEffect(() => {
@@ -662,6 +665,7 @@ export default function App() {
         pageProxy.current = page;
         await drawBitmap(page, view, canvas, zoomRef.current);
         if (cancelled) return;
+        lastViewport.current = view;
         setViewport(view);
         const content = await page.getTextContent();
         if (!cancelled) setTextLines(buildLines(content.items, view));
@@ -910,6 +914,15 @@ export default function App() {
           event.preventDefault();
           finishEditing();
           setPageNumber((n) => Math.min(pdf.numPages, n + 1));
+          return;
+        }
+        // Up/Down arrows scroll the page area.
+        if ((event.key === "ArrowUp" || event.key === "ArrowDown") && canvasBox.current) {
+          event.preventDefault();
+          canvasBox.current.scrollBy({
+            top: (event.key === "ArrowDown" ? 1 : -1) * (event.shiftKey ? 320 : 96),
+            behavior: "smooth",
+          });
           return;
         }
       }
@@ -1395,17 +1408,14 @@ export default function App() {
       // A signature is a text box fixed to a script font with its own size.
       const sign = tool === "sign";
       const textSize = sign ? signSize : size;
-      const width = Math.max(
-        sign ? 220 : 120,
-        Math.min(sign ? 360 : 260, viewport.width - p.x - 8),
-      );
+      const preset = sign ? signText.trim() : "";
       const item: TextItem = {
         kind: "text",
         id: uid(),
         x: p.x,
         y: p.y,
-        width,
-        text: "",
+        width: Math.max(sign ? 220 : 120, Math.min(sign ? 360 : 260, viewport.width - p.x - 8)),
+        text: preset,
         color,
         size: textSize,
         font: sign ? SIGNATURE_FONT : font,
@@ -1415,6 +1425,15 @@ export default function App() {
         underline: false,
         strike: false,
       };
+      if (preset) {
+        // A saved signature drops in ready-made: size the box to the text.
+        measureCtx.font = fontString(item);
+        item.width = Math.min(viewport.width - p.x - 8, Math.ceil(measureCtx.measureText(preset).width) + textSize * 0.6);
+        addItem(item);
+        setSelectedId(item.id);
+        setStatus("Signature placed");
+        return;
+      }
       addItem(item);
       setSelectedId(item.id);
       setEditingId(item.id);
@@ -1775,8 +1794,8 @@ export default function App() {
             />
             <span>.pdf</span>
           </label>
-          <button className="primary" disabled={!pdf || busy} onClick={() => void exportPdf()}>
-            {busy ? "Please wait…" : "Export"}
+          <button className="primary" disabled={!pdf || busy} aria-busy={busy} onClick={() => void exportPdf()}>
+            Export
           </button>
         </div>
       </header>
@@ -1839,6 +1858,24 @@ export default function App() {
               {active && opts && panelOpen && (
                 <div className="rail-pop tool-pop" role="dialog" aria-label={`${t.label} options`}>
                   <div className="tool-pop-title">{t.label}</div>
+                  {isSign && (
+                    <div className="tool-pop-row">
+                      <span className="tool-pop-label">Text</span>
+                      <input
+                        className="tool-pop-text"
+                        type="text"
+                        value={signText}
+                        placeholder="Type your signature once"
+                        spellCheck={false}
+                        aria-label="Signature text"
+                        style={{ fontFamily: `"${SIGNATURE_FONT}"` }}
+                        onChange={(event) => setSignText(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") setPanelOpen(false);
+                        }}
+                      />
+                    </div>
+                  )}
                   <div className="tool-pop-row">
                     <span className="tool-pop-label">Color</span>
                     <div className="quick-colors">
@@ -2051,7 +2088,7 @@ export default function App() {
           <div
             ref={pageBox}
             className={`page tool-${tool} ${zoom !== 1 ? "zoomed" : ""}`}
-            style={{ width: (viewport?.width || 800) * zoom }}
+            style={{ width: ((viewport ?? lastViewport.current)?.width ?? 800) * zoom }}
           >
             {viewport && !cropRect &&
               // Neighbouring pages fan out behind the current sheet: previous

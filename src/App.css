@@ -238,9 +238,14 @@ button:focus-visible {
   outline: 2px solid #93b4ff;
   outline-offset: 2px;
 }
+button {
+  transition: opacity 0.12s;
+}
+/* Delay the dimmed look so quick operations (rotate, page moves) don't flash. */
 button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+  transition: opacity 0.12s 0.35s;
 }
 button.primary {
   background: #2563eb;
@@ -453,6 +458,32 @@ button.link:hover:not(:disabled) {
   min-width: 0;
   accent-color: #2563eb;
 }
+.tool-pop-text {
+  grid-column: 2 / -1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 8px;
+  background: #1720330f;
+  color: #172033;
+  font-size: 18px;
+  line-height: 32px;
+  transition: background 0.12s, box-shadow 0.12s;
+}
+.tool-pop-text::placeholder {
+  color: #94a3b8;
+  font-size: 13px;
+  font-family: Inter, system-ui, sans-serif;
+}
+.tool-pop-text:hover {
+  background: #17203318;
+}
+.tool-pop-text:focus-visible {
+  outline: none;
+  background: #17203318;
+  box-shadow: 0 0 0 2px #2563eb66;
+}
 .quick-colors {
   grid-column: 2 / -1;
   display: flex;
@@ -586,8 +617,8 @@ button.link:hover:not(:disabled) {
 }
 /* Neighbouring pages fanned out behind the current one: previous pages step
    left, following pages step right (--side is -1 or 1). Only the offset edge
-   shows; it is a button that jumps to that page. Greyed at rest, the border
-   lights up on hover. */
+   shows; it is a button that jumps to that page. Always greyed; only the
+   border lights up on hover. */
 .sheet {
   --step: 28px;
   position: absolute;
@@ -604,10 +635,9 @@ button.link:hover:not(:disabled) {
   cursor: pointer;
   transition: transform 0.16s cubic-bezier(0.2, 0.8, 0.2, 1), filter 0.16s, box-shadow 0.16s;
 }
+/* Hover only lights the border; the sheet stays grey and in place. */
 .sheet:hover:not(:disabled) {
   background: white;
-  transform: translate(calc(var(--side) * (var(--depth) * var(--step) + 10px)), calc(var(--depth) * var(--step)));
-  filter: none;
   box-shadow: 0 0 0 2px #2563eb, 0 0 0 6px #2563eb26, 0 12px 32px -12px #17203366;
 }
 .sheet:focus-visible {
