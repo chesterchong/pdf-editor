@@ -832,7 +832,8 @@ button.link:hover:not(:disabled) {
 .crop-rect .handle.ne { left: 100%; top: 0; }
 .crop-rect .handle.sw { left: 0; top: 100%; }
 .crop-rect .handle.se { left: 100%; top: 100%; }
-.crop-bar {
+/* Doubled selector so this wins over the later .floatbar rule. */
+.floatbar.crop-bar {
   z-index: 2;
   left: 50%;
   bottom: 14px;

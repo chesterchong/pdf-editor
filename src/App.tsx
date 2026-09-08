@@ -657,7 +657,9 @@ export default function App() {
       cancelled = true;
       bitmapTask.current?.cancel();
     };
-  }, [pdf, pageNumber]);
+    // `organizing` is included because leaving the page grid remounts the
+    // canvas element, which then needs painting again.
+  }, [pdf, pageNumber, organizing]);
 
   // Re-rasterise at the new zoom (debounced) so the page stays crisp, and keep
   // the point under the cursor (or the centre of the view) fixed while zooming.
