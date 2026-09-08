@@ -450,6 +450,11 @@ export default function App() {
   const overlayCanvas = useRef<HTMLCanvasElement>(null);
   const pageBox = useRef<HTMLDivElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const floatbar = useRef<HTMLDivElement>(null);
+  // True while a pointer is down inside the floating toolbar, so the text box
+  // being edited survives the focus change (Safari gives blur no relatedTarget).
+  const barPress = useRef(false);
+  const skipFocusHistory = useRef(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const canvasBox = useRef<HTMLElement>(null);
   const panelRoot = useRef<HTMLDivElement>(null);
@@ -724,6 +729,23 @@ export default function App() {
         setZoom(1);
         return;
       }
+      // Text formatting: ⌘/Ctrl+B, I, U and ⌘/Ctrl+Shift+X (strikethrough).
+      // Works on the selected text box, including while typing inside it.
+      const textTarget =
+        editing ?? (selected?.kind === "text" ? selected : null);
+      if (mod && textTarget && (!typing || target === textarea.current)) {
+        const format: Partial<Record<string, "bold" | "italic" | "underline" | "strike">> = {
+          b: "bold",
+          i: "italic",
+          u: "underline",
+        };
+        const field = event.shiftKey && key === "x" ? "strike" : !event.shiftKey ? format[key] : undefined;
+        if (field) {
+          event.preventDefault();
+          updateItem(textTarget.id, { [field]: !textTarget[field] });
+          return;
+        }
+      }
       if (typing) return;
       if (!mod && !event.altKey && pdf && !busy) {
         const byKey: Record<string, Tool> = {
@@ -867,6 +889,13 @@ export default function App() {
       if (inRect(p, itemRect(item))) return item;
     }
     return null;
+  }
+
+  /** Hand focus back to the text box after using a toolbar control. */
+  function refocusEditor() {
+    if (!editingId || !textarea.current) return;
+    skipFocusHistory.current = true;
+    textarea.current.focus();
   }
 
   function finishEditing() {
@@ -1417,8 +1446,13 @@ export default function App() {
 
             {viewport && selected && selectedRect && barPos && (
               <div
+                ref={floatbar}
                 className="floatbar"
                 role="toolbar"
+                onPointerDown={() => {
+                  barPress.current = true;
+                  window.setTimeout(() => (barPress.current = false), 0);
+                }}
                 aria-label={selected.kind === "text" ? "Text formatting" : "Image options"}
                 style={{ left: barPos.left, top: barPos.top }}
               >
@@ -1431,6 +1465,7 @@ export default function App() {
                       onChange={(event) => {
                         setFont(event.target.value);
                         updateItem(selected.id, { font: event.target.value });
+                        refocusEditor();
                       }}
                     >
                       {FONTS.map((f) => (
@@ -1456,7 +1491,10 @@ export default function App() {
                       label="Text color"
                       value={selected.color}
                       defaultValue={DEFAULT_COLOR}
-                      onChange={(next) => updateItem(selected.id, { color: next })}
+                      onChange={(next) => {
+                        updateItem(selected.id, { color: next });
+                        refocusEditor();
+                      }}
                     />
                     <span className="sep" />
                     {(
@@ -1472,6 +1510,7 @@ export default function App() {
                         className={`fmt ${key} ${selected[key] ? "selected" : ""}`}
                         aria-pressed={selected[key]}
                         aria-label={key}
+                        title={`${key[0].toUpperCase()}${key.slice(1)}  ·  ${MOD}${key === "strike" ? "⇧X" : label}`}
                         onPointerDown={(event) => event.preventDefault()}
                         onClick={() => updateItem(selected.id, { [key]: !selected[key] })}
                       >
@@ -1543,8 +1582,19 @@ export default function App() {
                 onChange={(event) =>
                   updateItem(editing.id, { text: event.target.value }, false)
                 }
-                onFocus={() => pushHistory(itemsRef.current[pageNumber] ?? [])}
-                onBlur={finishEditing}
+                onFocus={() => {
+                  if (skipFocusHistory.current) {
+                    skipFocusHistory.current = false;
+                    return;
+                  }
+                  pushHistory(itemsRef.current[pageNumber] ?? []);
+                }}
+                onBlur={(event) => {
+                  // Keep editing while focus moves into the floating toolbar.
+                  if (barPress.current) return;
+                  if (floatbar.current?.contains(event.relatedTarget as Node)) return;
+                  finishEditing();
+                }}
               />
             )}
           </div>
