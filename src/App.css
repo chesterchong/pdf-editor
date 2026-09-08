@@ -59,15 +59,17 @@ body {
   align-items: center;
   gap: 14px;
 }
-/* Open files hang from the top edge like bookmarks. */
+/* Open files as Chrome-style tabs: rounded tops, concave feet at the bottom,
+   each file in its own soft colour; the active tab wears a gentle gradient. */
 .tabs {
   flex: 1;
   min-width: 0;
   align-self: stretch;
   display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  margin: 0 20px;
+  align-items: flex-end;
+  gap: 2px;
+  margin: 0 16px;
+  padding: 8px 12px 0;
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -77,49 +79,53 @@ body {
 .tab {
   position: relative;
   display: inline-flex;
-  flex: 0 1 180px;
-  min-width: 110px;
+  flex: 0 1 200px;
+  min-width: 120px;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   height: 36px;
-  padding: 2px 6px 0 12px;
-  border: 1px solid transparent;
-  border-top: none;
-  border-radius: 0 0 12px 12px;
-  background: #17203312;
+  padding: 0 6px 0 12px;
+  border-radius: 10px 10px 0 0;
   color: #475569;
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
   user-select: none;
-  transition: background 0.14s, color 0.14s, height 0.14s, box-shadow 0.14s;
+  transition: background 0.14s, color 0.14s;
 }
-.tab:hover {
-  background: #1720331f;
+.tab:hover:not(.active) {
+  background: var(--tab-light);
   color: #172033;
 }
 .tab.active {
-  height: 40px;
-  border-color: #ffffffb3;
-  background: #ffffffe6;
+  z-index: 1;
+  height: 38px;
+  margin-bottom: -1px; /* sit on the hairline so the tab opens onto the page */
+  background: linear-gradient(180deg, var(--tab-light) 0%, var(--tab-tint) 100%);
   color: #172033;
   font-weight: 600;
-  box-shadow: 0 0 0 0.5px #17203314, 0 10px 24px -10px #17203352;
 }
-/* Ribbon stitched to the top edge */
-.tab.active::before {
+/* Concave feet, drawn with radial gradients in the tab's bottom colour. */
+.tab.active::before,
+.tab.active::after {
   content: "";
   position: absolute;
-  left: 10px;
-  right: 10px;
-  top: 0;
-  height: 2px;
-  border-radius: 0 0 2px 2px;
-  background: #2563eb;
+  bottom: 0;
+  width: 10px;
+  height: 10px;
+  pointer-events: none;
+}
+.tab.active::before {
+  left: -10px;
+  background: radial-gradient(circle at 0 0, transparent 9.5px, var(--tab-tint) 10.5px);
+}
+.tab.active::after {
+  right: -10px;
+  background: radial-gradient(circle at 100% 0, transparent 9.5px, var(--tab-tint) 10.5px);
 }
 .tab svg {
   flex: none;
-  color: #2563eb;
+  color: var(--tab-strong);
 }
 .tab-name {
   min-width: 0;
@@ -131,12 +137,12 @@ body {
   flex: none;
   width: 22px;
   min-height: 22px;
-  margin-left: 2px;
+  margin-left: auto;
   padding: 0;
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: #94a3b8;
+  color: #64748b;
   opacity: 0;
   transition: opacity 0.12s, background 0.12s, color 0.12s;
 }
@@ -146,17 +152,17 @@ body {
   opacity: 1;
 }
 .tab-close:hover:not(:disabled) {
-  background: #17203314;
+  background: #17203318;
   color: #172033;
 }
 .tab-add {
   flex: none;
   width: 30px;
   min-height: 30px;
-  margin-top: 3px;
+  margin: 0 0 3px 6px;
   padding: 0;
   border: none;
-  border-radius: 0 0 10px 10px;
+  border-radius: 8px;
   background: transparent;
   color: #64748b;
 }

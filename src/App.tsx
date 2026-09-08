@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type {
+  CSSProperties,
   DragEvent as ReactDragEvent,
   PointerEvent as ReactPointerEvent,
   ReactNode,
@@ -440,7 +441,22 @@ type DocState = {
   pageNumber: number;
   zoom: number;
 };
-type Doc = { id: string; name: string; state: DocState };
+type Doc = { id: string; name: string; tone: number; state: DocState };
+
+/** Soft tab colours, Chrome-style: a weak tint, a lighter tint for the
+ * gradient, and a strong accent for the file icon. */
+const TAB_TONES = [
+  { tint: "#dbe7fe", light: "#f1f6ff", strong: "#2563eb" },
+  { tint: "#ede4fe", light: "#f7f4ff", strong: "#7c3aed" },
+  { tint: "#cdf5ea", light: "#effdf8", strong: "#0d9488" },
+  { tint: "#fdecc8", light: "#fff8ea", strong: "#d97706" },
+  { tint: "#ffe1e6", light: "#fff3f5", strong: "#e11d48" },
+  { tint: "#d9f7e3", light: "#f1fdf5", strong: "#16a34a" },
+];
+function tabStyle(tone: number): CSSProperties {
+  const t = TAB_TONES[tone % TAB_TONES.length];
+  return { "--tab-tint": t.tint, "--tab-light": t.light, "--tab-strong": t.strong } as CSSProperties;
+}
 
 function freshDocState(pdf: PDFDocumentProxy, source: Uint8Array, exportName: string, annotations: Annotations = {}): DocState {
   return { pdf, source, exportName, annotations, history: {}, future: {}, structHistory: [], pageNumber: 1, zoom: 1 };
@@ -545,6 +561,8 @@ export default function App() {
   const [docs, setDocs] = useState<Doc[]>([]);
   const [activeDocId, setActiveDocId] = useState<string | null>(null);
   const structHistory = useRef<StructSnapshot[]>([]);
+  const toneSeq = useRef(0);
+  const newDoc = (name: string, state: DocState): Doc => ({ id: uid(), name, tone: toneSeq.current++, state });
   const [organizing, setOrganizing] = useState(false);
   const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
   const [dragPage, setDragPage] = useState<number | null>(null);
@@ -1072,7 +1090,7 @@ export default function App() {
         // PDF.js can transfer ownership of its buffer; keep a separate copy.
         const document = await getDocument({ data: bytes.slice() }).promise;
         const name = file.name.replace(/\.pdf$/i, "");
-        added.push({ id: uid(), name, state: freshDocState(document, bytes, `${name}-edited`) });
+        added.push(newDoc(name, freshDocState(document, bytes, `${name}-edited`)));
       }
       addDocs(added);
       setStatus(added.length === 1 ? "Opened new file" : `Opened ${added.length} files`);
@@ -1172,7 +1190,7 @@ export default function App() {
       const nextPdf = await getDocument({ data: bytes.slice() }).promise;
       const base = docs.find((d) => d.id === activeDocId)?.name ?? "document";
       const name = `${base} (${order.length === 1 ? `page ${order[0] + 1}` : `${order.length} pages`})`;
-      addDocs([{ id: uid(), name, state: freshDocState(nextPdf, bytes, name, remapAnnotations(itemsRef.current, order.map((i) => i + 1))) }]);
+      addDocs([newDoc(name, freshDocState(nextPdf, bytes, name, remapAnnotations(itemsRef.current, order.map((i) => i + 1))))]);
       setOrganizing(true);
       setStatus("Pages extracted to new file");
     } catch (error) {
@@ -1197,7 +1215,7 @@ export default function App() {
         }
         offset += d.state.pdf.numPages;
       }
-      addDocs([{ id: uid(), name: "Combined", state: freshDocState(nextPdf, bytes, "Combined", annotations) }]);
+      addDocs([newDoc("Combined", freshDocState(nextPdf, bytes, "Combined", annotations))]);
       setOrganizing(true);
       setStatus(`${all.length} files combined`);
     } catch (error) {
@@ -1687,6 +1705,7 @@ export default function App() {
                 tabIndex={0}
                 aria-selected={d.id === activeDocId}
                 className={`tab ${d.id === activeDocId ? "active" : ""}`}
+                style={tabStyle(d.tone)}
                 title={d.name}
                 onClick={() => activateDoc(d.id)}
                 onKeyDown={(event) => {
