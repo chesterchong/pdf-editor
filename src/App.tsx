@@ -423,7 +423,7 @@ export default function App() {
   const [sigFont, setSigFont] = useState(SIGNATURE_FONTS[0]);
   const [cssScale, setCssScale] = useState(1);
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState("Open a PDF to get started.");
+  const [status, setStatus] = useState("");
   const [historyLength, setHistoryLength] = useState(0);
 
   const pageCanvas = useRef<HTMLCanvasElement>(null);
