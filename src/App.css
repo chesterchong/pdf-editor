@@ -301,6 +301,30 @@ button.link:hover:not(:disabled) {
   font-weight: 600;
   letter-spacing: -0.1px;
 }
+.tool-pop-row input[type="range"] {
+  height: 4px;
+  border-radius: 999px;
+  background: #1720331f;
+  appearance: none;
+  -webkit-appearance: none;
+}
+.tool-pop-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid #2563eb;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 3px #17203340;
+}
+.tool-pop-row input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid #2563eb;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 3px #17203340;
+}
 .tool-pop-row {
   display: grid;
   grid-template-columns: 64px 1fr auto;
@@ -365,13 +389,34 @@ button.link:hover:not(:disabled) {
   left: auto;
 }
 .rail-pop input[type="number"] {
-  width: 56px;
-  height: 30px;
-  padding: 0 6px;
-  border: 1px solid #dce2ec;
-  border-radius: 6px;
+  width: 48px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: #1720330f;
+  color: #172033;
   font: inherit;
   font-size: 13px;
+  font-weight: 500;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  appearance: textfield;
+  -moz-appearance: textfield;
+  transition: background 0.12s, box-shadow 0.12s;
+}
+.rail-pop input[type="number"]::-webkit-inner-spin-button,
+.rail-pop input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.rail-pop input[type="number"]:hover {
+  background: #17203318;
+}
+.rail-pop input[type="number"]:focus-visible {
+  outline: none;
+  background: #17203318;
+  box-shadow: 0 0 0 2px #2563eb66;
 }
 
 /* Tooltips (TradingView-style, to the right of the rail) */
@@ -707,6 +752,7 @@ kbd {
 .rail-pop,
 .cp-pop {
   border-radius: 14px;
+  background: #ffffffa3;
 }
 
 .floatbar {
