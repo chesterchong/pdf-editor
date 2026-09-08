@@ -21,14 +21,24 @@ body {
   grid-template-rows: 52px 1fr 46px;
   height: 100%;
 }
+/* Chrome bars float over the canvas as frosted glass; the canvas spans the
+   whole window underneath so the page shows through as it scrolls. */
+.topbar,
+.rail,
+.bottombar {
+  z-index: 30;
+  background: #ffffffbf;
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+}
 .topbar {
-  grid-column: 1 / -1;
+  grid-area: 1 / 1 / 2 / -1;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 16px 0 14px;
-  border-bottom: 1px solid #e2e8f0;
-  background: white;
+  border-bottom: 1px solid #17203314;
+  box-shadow: inset 0 1px 0 #ffffffcc;
 }
 .brand {
   display: flex;
@@ -53,9 +63,9 @@ body {
   align-items: center;
   min-height: 36px;
   padding: 0 10px 0 0;
-  border: 1px solid #dce2ec;
-  border-radius: 8px;
-  background: white;
+  border: 1px solid #17203324;
+  border-radius: 10px;
+  background: #ffffff99;
   color: #64748b;
   font-size: 14px;
 }
@@ -144,14 +154,13 @@ button.link:hover:not(:disabled) {
 
 /* ---- Left tool rail ---- */
 .rail {
-  grid-row: 2;
+  grid-area: 2 / 1 / 3 / 2;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
   padding: 8px 0;
-  border-right: 1px solid #e2e8f0;
-  background: white;
+  border-right: 1px solid #17203314;
   overflow: visible;
 }
 .rail-btn {
@@ -195,11 +204,18 @@ button.link:hover:not(:disabled) {
   font-weight: 700;
   line-height: 13px;
 }
+.rail-spacer {
+  flex: 1;
+}
+.rail-btn.danger:hover:not(:disabled) {
+  background: #dc26261a;
+  color: #dc2626;
+}
 .rail-sep {
   width: 26px;
   height: 1px;
   margin: 6px 0;
-  background: #e2e8f0;
+  background: #1720331a;
 }
 .rail-item {
   position: relative;
@@ -391,10 +407,11 @@ button.link:hover:not(:disabled) {
 
 /* ---- Canvas area ---- */
 .canvas {
-  grid-row: 2;
+  grid-area: 1 / 1 / -1 / -1;
   position: relative;
   overflow: auto;
-  padding: 28px;
+  /* Clear the floating top bar, rail and bottom bar. */
+  padding: 80px 28px 74px 84px;
   background: #e6eaf2;
 }
 .page {
@@ -488,19 +505,17 @@ kbd {
 
 /* ---- Bottom bar ---- */
 .bottombar {
-  grid-column: 1 / -1;
-  grid-row: 3;
+  grid-area: 3 / 1 / 4 / -1;
   position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 0 16px;
-  border-top: 1px solid #e2e8f0;
-  background: white;
+  border-top: 1px solid #17203314;
 }
 .bottombar .status {
   position: absolute;
-  left: 16px;
+  left: 70px;
   top: 50%;
   max-width: 40%;
   margin: 0;
@@ -558,33 +573,57 @@ kbd {
 /* ---- Selection, handles, floating toolbar, inline editor ---- */
 .selection {
   position: absolute;
-  border: 1.5px solid #2563eb;
-  border-radius: 2px;
-  box-shadow: 0 0 0 1px #ffffffb3;
   pointer-events: none;
+}
+/* Frame drawn 5px outside the item so it never hugs the glyphs. */
+.selection::before {
+  content: "";
+  position: absolute;
+  inset: -5px;
+  border: 1.5px solid #2563eb;
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px #ffffffb3, 0 0 0 4px #2563eb14;
 }
 .handle {
   position: absolute;
-  width: 11px;
-  height: 11px;
+  pointer-events: auto;
+  touch-action: none;
+}
+/* Corner dots */
+.handle.nw,
+.handle.ne,
+.handle.sw,
+.handle.se {
+  width: 9px;
+  height: 9px;
   border: 1.5px solid #2563eb;
   border-radius: 50%;
   background: white;
   box-shadow: 0 1px 3px #17203340;
   transform: translate(-50%, -50%);
-  pointer-events: auto;
-  touch-action: none;
   transition: transform 0.1s;
 }
-.handle:hover {
-  transform: translate(-50%, -50%) scale(1.25);
+.handle.nw:hover,
+.handle.ne:hover,
+.handle.sw:hover,
+.handle.se:hover {
+  transform: translate(-50%, -50%) scale(1.3);
 }
-.handle.nw { left: 0; top: 0; cursor: nwse-resize; }
-.handle.ne { left: 100%; top: 0; cursor: nesw-resize; }
-.handle.sw { left: 0; top: 100%; cursor: nesw-resize; }
-.handle.se { left: 100%; top: 100%; cursor: nwse-resize; }
-.handle.e { left: 100%; top: 50%; cursor: ew-resize; }
-.handle.w { left: 0; top: 50%; cursor: ew-resize; }
+.handle.nw { left: -5px; top: -5px; cursor: nwse-resize; }
+.handle.ne { left: calc(100% + 5px); top: -5px; cursor: nesw-resize; }
+.handle.sw { left: -5px; top: calc(100% + 5px); cursor: nesw-resize; }
+.handle.se { left: calc(100% + 5px); top: calc(100% + 5px); cursor: nwse-resize; }
+/* Side edges: invisible strips along the frame, draggable to change width. */
+.handle.e,
+.handle.w {
+  top: 0;
+  width: 10px;
+  height: 100%;
+  transform: translateX(-50%);
+  cursor: ew-resize;
+}
+.handle.e { left: calc(100% + 5px); }
+.handle.w { left: -5px; }
 
 /* Frosted-glass surface shared by the floating toolbar and popovers. */
 .floatbar,

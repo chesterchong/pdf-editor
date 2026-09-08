@@ -803,6 +803,28 @@ export default function App() {
     if (editingId === id) setEditingId(null);
   }
 
+  /** Remove every annotation on every page; each page stays undoable. */
+  function clearAll() {
+    const pages = Object.entries(itemsRef.current).filter(([, list]) => list.length);
+    const count = pages.reduce((n, [, list]) => n + list.length, 0);
+    if (!count) return;
+    if (
+      !window.confirm(
+        `Remove ${count === 1 ? "the only annotation" : `all ${count} annotations`} from this document? You can undo per page with ${MOD}Z.`,
+      )
+    )
+      return;
+    for (const [key, list] of pages) {
+      const n = Number(key);
+      history.current[n] = [...(history.current[n] ?? []).slice(-49), list];
+      future.current[n] = [];
+    }
+    setEditingId(null);
+    setSelectedId(null);
+    setAnnotations({});
+    setStatus("All annotations removed.");
+  }
+
   function undo() {
     const stack = history.current[pageNumber] ?? [];
     const previous = stack.pop();
@@ -1205,6 +1227,7 @@ export default function App() {
     }
   }
 
+  const annotationCount = Object.values(annotations).reduce((n, list) => n + list.length, 0);
   const selectedRect = selected && viewport ? itemRect(selected) : null;
   // Anchor the contextual toolbar above the selection (below it near the top
   // edge), clamped to the page so it never causes layout to shift.
@@ -1386,6 +1409,18 @@ export default function App() {
             </div>
           );
         })}
+        <div className="rail-spacer" />
+        <button
+          className="rail-btn danger"
+          aria-label="Clear all annotations"
+          data-tip="Clear all annotations"
+          disabled={busy || !annotationCount}
+          onClick={clearAll}
+        >
+          {icon(
+            "M4 20h9M8.5 20 3.6 15.1a1.5 1.5 0 0 1 0-2.1l8.4-8.4a1.5 1.5 0 0 1 2.1 0l5.3 5.3a1.5 1.5 0 0 1 0 2.1L12.5 20M6.5 10.5l7 7",
+          )}
+        </button>
       </aside>
 
       <section className="canvas" ref={canvasBox}>
