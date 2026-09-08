@@ -26,10 +26,7 @@
   z-index: 50;
   width: 232px;
   padding: 8px 10px 10px;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  background: white;
-  box-shadow: 0 10px 28px #17203326, 0 1px 2px #17203314;
+  border-radius: 14px;
 }
 .cp-pop .cp-reset {
   display: inline-flex;
