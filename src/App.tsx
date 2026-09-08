@@ -104,6 +104,8 @@ function exportFilename(raw: string): string {
 }
 
 const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl+";
+/** Rail order; also the 1–6 keyboard shortcuts. */
+const TOOL_ORDER: Tool[] = ["select", "text", "draw", "highlight", "sign", "image"];
 
 /** Tools with a colour/size fly-out. Text is excluded: its floating toolbar
  * already covers font, size and colour once a box exists. */
@@ -828,11 +830,18 @@ export default function App() {
         (target.tagName === "INPUT" ||
           target.tagName === "TEXTAREA" ||
           target.tagName === "SELECT");
-      if (event.key === "Escape") {
+      // Escape (and Enter outside a text field) backs out of whatever is
+      // active and returns to the Select tool.
+      const onControl =
+        target instanceof Element && !!target.closest('button, a, [role="button"], [role="tab"]');
+      if (event.key === "Escape" || (event.key === "Enter" && !typing && !onControl)) {
+        if (typing && event.key === "Escape") (target as HTMLElement).blur();
         if (cropRect) setCropRect(null);
-        else if (editingId) finishEditing();
-        else if (organizing) setOrganizing(false);
-        else setSelectedId(null);
+        if (editingId) finishEditing();
+        if (organizing) setOrganizing(false);
+        setPanelOpen(false);
+        setSelectedId(null);
+        if (tool !== "select") pickTool("select");
         return;
       }
       const mod = event.metaKey || event.ctrlKey;
@@ -935,7 +944,8 @@ export default function App() {
           s: "sign",
           i: "image",
         };
-        const next = byKey[key];
+        // Digits pick tools in rail order: 1 Select, 2 Text, 3 Draw, ...
+        const next = byKey[key] ?? TOOL_ORDER[Number(key) - 1];
         if (next) {
           event.preventDefault();
           pickTool(next);
@@ -1825,7 +1835,7 @@ export default function App() {
           )}
         </button>
         <div className="rail-sep" />
-        {tools.map((t) => {
+        {tools.map((t, index) => {
           const opts = TOOL_OPTIONS[t.id];
           const active = tool === t.id;
           const isHighlight = t.id === "highlight";
@@ -1839,7 +1849,7 @@ export default function App() {
               key={t.id}
               className="rail-item"
               ref={active && opts ? panelRoot : undefined}
-              data-tip={`${t.label}  ·  ${t.shortcut}`}
+              data-tip={`${t.label}  ·  ${index + 1}  ·  ${t.shortcut}`}
             >
               <button
                 className={`rail-btn ${active ? "active" : ""} ${opts ? "has-options" : ""}`}
@@ -2185,7 +2195,7 @@ export default function App() {
                 }}
               >
                 {(selected.kind === "text" && selected.signature
-                  ? ([] as Handle[])
+                  ? (["se"] as Handle[])
                   : selected.kind === "image"
                   ? (["nw", "ne", "sw", "se"] as Handle[])
                   : (["nw", "ne", "sw", "se", "e", "w"] as Handle[])
