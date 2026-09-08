@@ -108,7 +108,7 @@ const FONTS = [
   "Pacifico",
   "Caveat",
 ];
-const SIGNATURE_FONTS = ["Dancing Script", "Great Vibes", "Pacifico", "Caveat"];
+const SIGNATURE_FONT = "Dancing Script";
 const LINE_HEIGHT = 1.3;
 const HIGHLIGHT_ALPHA = 0.45;
 
@@ -423,8 +423,6 @@ export default function App() {
   const [draft, setDraft] = useState<Item | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [sigText, setSigText] = useState("");
-  const [sigFont, setSigFont] = useState(SIGNATURE_FONTS[0]);
   const [cssScale, setCssScale] = useState(1);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -789,8 +787,14 @@ export default function App() {
       setSelectedId(null);
       return;
     }
-    if (tool === "text") {
-      const width = Math.max(120, Math.min(260, viewport.width - p.x - 8));
+    if (tool === "text" || tool === "sign") {
+      // A signature is a text box preset to a script font at a larger size.
+      const sign = tool === "sign";
+      const textSize = sign ? Math.max(28, size * 2) : size;
+      const width = Math.max(
+        sign ? 220 : 120,
+        Math.min(sign ? 360 : 260, viewport.width - p.x - 8),
+      );
       const item: TextItem = {
         kind: "text",
         id: uid(),
@@ -799,8 +803,8 @@ export default function App() {
         width,
         text: "",
         color,
-        size,
-        font,
+        size: textSize,
+        font: sign ? SIGNATURE_FONT : font,
         bold: false,
         italic: false,
         underline: false,
@@ -813,7 +817,7 @@ export default function App() {
     }
     if (tool === "image") {
       if (!image) {
-        setStatus("Choose an image first.");
+        setStatus("Paste an image (Ctrl+V / ⌘+V) or drop one onto the page, then click to place it.");
         return;
       }
       const width = Math.min(size * 10, viewport.width / 2);
@@ -829,9 +833,6 @@ export default function App() {
       addItem(item);
       setSelectedId(item.id);
       setTool("select");
-      return;
-    }
-    if (tool === "sign") {
       return;
     }
     setSelectedId(null);
@@ -969,37 +970,13 @@ export default function App() {
     };
   }
 
-  function addSignature() {
-    if (!viewport || !sigText.trim()) return;
-    const item: TextItem = {
-      kind: "text",
-      id: uid(),
-      x: 0,
-      y: 0,
-      width: 0,
-      text: sigText.trim(),
-      color,
-      size: 44,
-      font: sigFont,
-      bold: false,
-      italic: false,
-      underline: false,
-      strike: false,
-    };
-    measureCtx.font = fontString(item);
-    item.width = Math.ceil(measureCtx.measureText(item.text).width) + 8;
-    item.x = Math.max(0, (viewport.width - item.width) / 2);
-    item.y = viewport.height * 0.6;
-    addItem(item);
-    setSelectedId(item.id);
-    setTool("select");
-    setStatus("Signature added. Drag it into place; drag a corner to resize.");
-  }
-
   function pickTool(next: Tool) {
     finishEditing();
     setTool(next);
     if (next !== "select") setSelectedId(null);
+    if (next === "image" && !image) {
+      setStatus("Paste an image (Ctrl+V / ⌘+V) or drop one onto the page, then click to place it.");
+    }
   }
 
   async function savePdf() {
@@ -1183,56 +1160,7 @@ export default function App() {
           />
           <span>{size}</span>
         </label>
-        <label className="file-button">
-          Choose image
-          <input
-            type="file"
-            accept="image/png,image/jpeg,image/webp"
-            disabled={busy}
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (file) void openImage(file);
-              event.target.value = "";
-            }}
-          />
-        </label>
       </section>
-
-      {tool === "sign" && pdf && (
-        <section className="panel" aria-label="Signature">
-          <input
-            className="sig-input"
-            placeholder="Type your name"
-            value={sigText}
-            onChange={(event) => setSigText(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") addSignature();
-            }}
-          />
-          <div className="sig-styles" role="radiogroup" aria-label="Signature style">
-            {SIGNATURE_FONTS.map((f) => (
-              <button
-                key={f}
-                role="radio"
-                aria-checked={sigFont === f}
-                className={`sig-style ${sigFont === f ? "selected" : ""}`}
-                style={{ fontFamily: `"${f}", cursive`, color }}
-                onClick={() => setSigFont(f)}
-              >
-                {sigText.trim() || "Your Name"}
-              </button>
-            ))}
-          </div>
-          <button
-            className="primary"
-            disabled={!sigText.trim() || !viewport}
-            onClick={addSignature}
-          >
-            Add signature
-          </button>
-          <span className="hint">Prefer handwriting? Use Draw to sign with your mouse or finger.</span>
-        </section>
-      )}
 
       {selected?.kind === "text" && (
         <section className="panel props" aria-label="Text formatting">

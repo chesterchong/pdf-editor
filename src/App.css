@@ -199,19 +199,6 @@ footer {
 }
 .panel select,
 .panel input[type="number"],
-.sig-input {
-  min-height: 38px;
-  padding: 6px 10px;
-  border: 1px solid #dce2ec;
-  border-radius: 8px;
-  background: white;
-  color: #172033;
-  font: inherit;
-  font-size: 14px;
-}
-.sig-input {
-  min-width: 220px;
-}
 .panel .num {
   width: 72px;
 }
@@ -238,29 +225,12 @@ footer {
   color: #64748b;
   font-size: 13px;
 }
-.sig-styles {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.sig-style {
-  min-width: 150px;
-  min-height: 52px;
-  font-size: 26px;
-  font-weight: 400;
-  text-transform: none;
-  line-height: 1;
-}
-.sig-style.selected {
-  border-color: #2563eb;
-  box-shadow: 0 0 0 2px #bfd3ff;
-}
 
 /* Tool cursors */
 .page.tool-select .overlay { cursor: default; }
 .page.tool-text .overlay { cursor: text; }
 .page.tool-image .overlay { cursor: copy; }
-.page.tool-sign .overlay { cursor: default; }
+.page.tool-sign .overlay { cursor: text; }
 
 /* Selection box and resize handles */
 .selection {
