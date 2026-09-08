@@ -18,9 +18,13 @@ import "@fontsource/great-vibes/400.css";
 import "@fontsource/pacifico/400.css";
 import "@fontsource/caveat/400.css";
 import "@fontsource/caveat/700.css";
+import { ColorPicker } from "./ColorPicker";
 import "./App.css";
 
 GlobalWorkerOptions.workerSrc = workerUrl;
+
+const DEFAULT_COLOR = "#1d4ed8";
+const DEFAULT_HIGHLIGHT = "#ffe95c";
 
 type Point = { x: number; y: number };
 type Rect = { x: number; y: number; w: number; h: number };
@@ -411,8 +415,8 @@ export default function App() {
   const [textLines, setTextLines] = useState<Line[]>([]);
   const [annotations, setAnnotations] = useState<Record<number, Item[]>>({});
   const [tool, setTool] = useState<Tool>("select");
-  const [color, setColor] = useState("#1d4ed8");
-  const [highlightColor, setHighlightColor] = useState("#ffe95c");
+  const [color, setColor] = useState(DEFAULT_COLOR);
+  const [highlightColor, setHighlightColor] = useState(DEFAULT_HIGHLIGHT);
   const [size, setSize] = useState(18);
   const [font, setFont] = useState("Arial");
   const [image, setImage] = useState<HTMLImageElement | null>(null);
@@ -424,7 +428,6 @@ export default function App() {
   const [cssScale, setCssScale] = useState(1);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
-  const [historyLength, setHistoryLength] = useState(0);
 
   const pageCanvas = useRef<HTMLCanvasElement>(null);
   const overlayCanvas = useRef<HTMLCanvasElement>(null);
@@ -434,6 +437,7 @@ export default function App() {
   const drag = useRef<Drag | null>(null);
   const itemsRef = useRef<Record<number, Item[]>>({});
   const history = useRef<Record<number, Item[][]>>({});
+  const future = useRef<Record<number, Item[][]>>({});
   itemsRef.current = annotations;
 
   const items = annotations[pageNumber] ?? [];
@@ -593,6 +597,21 @@ export default function App() {
         else setSelectedId(null);
         return;
       }
+      const mod = event.metaKey || event.ctrlKey;
+      const key = event.key.toLowerCase();
+      // Undo / redo work everywhere except inside a text field, where the
+      // browser's own text undo takes over.
+      if (mod && !typing && key === "z") {
+        event.preventDefault();
+        if (event.shiftKey) redo();
+        else undo();
+        return;
+      }
+      if (mod && !typing && key === "y") {
+        event.preventDefault();
+        redo();
+        return;
+      }
       if (typing) return;
       if ((event.key === "Delete" || event.key === "Backspace") && selectedId) {
         event.preventDefault();
@@ -606,7 +625,8 @@ export default function App() {
   function pushHistory(snapshot: Item[]) {
     const stack = history.current[pageNumber] ?? [];
     history.current[pageNumber] = [...stack.slice(-49), snapshot];
-    setHistoryLength(history.current[pageNumber].length);
+    // A new change invalidates anything that could be redone.
+    future.current[pageNumber] = [];
   }
 
   function setItems(next: Item[], record = true) {
@@ -637,10 +657,28 @@ export default function App() {
     const stack = history.current[pageNumber] ?? [];
     const previous = stack.pop();
     if (!previous) return;
-    setHistoryLength(stack.length);
+    const redoStack = future.current[pageNumber] ?? [];
+    future.current[pageNumber] = [
+      ...redoStack.slice(-49),
+      itemsRef.current[pageNumber] ?? [],
+    ];
     setEditingId(null);
     setSelectedId(null);
     setAnnotations((current) => ({ ...current, [pageNumber]: previous }));
+  }
+
+  function redo() {
+    const redoStack = future.current[pageNumber] ?? [];
+    const next = redoStack.pop();
+    if (!next) return;
+    const stack = history.current[pageNumber] ?? [];
+    history.current[pageNumber] = [
+      ...stack.slice(-49),
+      itemsRef.current[pageNumber] ?? [],
+    ];
+    setEditingId(null);
+    setSelectedId(null);
+    setAnnotations((current) => ({ ...current, [pageNumber]: next }));
   }
 
   async function openPdf(file: File) {
@@ -661,7 +699,7 @@ export default function App() {
       setPageNumber(1);
       setAnnotations({});
       history.current = {};
-      setHistoryLength(0);
+      future.current = {};
       setStatus("PDF ready. Pick a tool, or click an item to move or resize it.");
     } catch (error) {
       setStatus(`Could not open PDF: ${message(error)}`);
@@ -794,7 +832,6 @@ export default function App() {
       return;
     }
     if (tool === "sign") {
-      setStatus("Type your name in the signature panel, or use Draw to sign by hand.");
       return;
     }
     setSelectedId(null);
@@ -963,9 +1000,6 @@ export default function App() {
     finishEditing();
     setTool(next);
     if (next !== "select") setSelectedId(null);
-    if (next === "sign") {
-      setStatus("Type your name and choose a style, or pick Draw to sign by hand.");
-    }
   }
 
   async function savePdf() {
@@ -1075,10 +1109,7 @@ export default function App() {
   return (
     <main onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
       <header>
-        <div>
-          <h1>PDF Studio</h1>
-          <p>Edit privately in your browser. Your files never leave this device.</p>
-        </div>
+        <h1>PDF Studio</h1>
         <button
           className="primary"
           disabled={!pdf || busy}
@@ -1115,30 +1146,30 @@ export default function App() {
           ))}
         </div>
         {tool === "highlight" ? (
-          <label className="control">
+          <div className="control">
             Highlight
-            <input
-              aria-label="Highlight color"
-              type="color"
+            <ColorPicker
+              label="Highlight color"
               value={highlightColor}
-              onChange={(event) => setHighlightColor(event.target.value)}
+              defaultValue={DEFAULT_HIGHLIGHT}
+              onChange={setHighlightColor}
             />
-          </label>
+          </div>
         ) : (
-          <label className="control">
+          <div className="control">
             Color
-            <input
-              aria-label="Annotation color"
-              type="color"
+            <ColorPicker
+              label="Annotation color"
               value={color}
-              onChange={(event) => {
-                setColor(event.target.value);
+              defaultValue={DEFAULT_COLOR}
+              onChange={(next) => {
+                setColor(next);
                 if (selected?.kind === "text") {
-                  updateItem(selected.id, { color: event.target.value });
+                  updateItem(selected.id, { color: next });
                 }
               }}
             />
-          </label>
+          </div>
         )}
         <label className="control">
           {tool === "text" ? "Font size" : "Size"}
@@ -1165,9 +1196,6 @@ export default function App() {
             }}
           />
         </label>
-        <button onClick={undo} disabled={busy || !historyLength}>
-          Undo
-        </button>
       </section>
 
       {tool === "sign" && pdf && (
@@ -1236,11 +1264,11 @@ export default function App() {
               })
             }
           />
-          <input
-            aria-label="Text color"
-            type="color"
+          <ColorPicker
+            label="Text color"
             value={selected.color}
-            onChange={(event) => updateItem(selected.id, { color: event.target.value })}
+            defaultValue={DEFAULT_COLOR}
+            onChange={(next) => updateItem(selected.id, { color: next })}
           />
           {(
             [
