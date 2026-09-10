@@ -5,9 +5,11 @@ import type {
   PointerEvent as ReactPointerEvent,
   ReactNode,
 } from "react";
-import { getDocument, GlobalWorkerOptions, OPS, RenderingCancelledException } from "pdfjs-dist";
-import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from "pdfjs-dist";
-import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+// The legacy build carries polyfills for browsers a few versions old, which
+// is the norm on phones; the standard build needs the very latest engines.
+import { getDocument, GlobalWorkerOptions, OPS, RenderingCancelledException } from "pdfjs-dist/legacy/build/pdf.mjs";
+import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from "pdfjs-dist/legacy/build/pdf.mjs";
+import workerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import {
   BlendMode,
   PDFArray,
@@ -152,6 +154,8 @@ type Drag =
   | { mode: "stroke" }
   | { mode: "highlight"; start: Point }
   | { mode: "marquee"; start: Point }
+  /** One finger scrolling the canvas (touch screens, Select tool). */
+  | { mode: "pan"; x: number; y: number; left: number; top: number }
   | { mode: "move"; id: string; start: Point; orig: Item; snapshot: Item[]; group?: { id: string; orig: Item }[] }
   | {
       mode: "resize";
@@ -198,6 +202,14 @@ const ZOOM_MAX = 4;
 const ZOOM_STEP = 1.25;
 const clampZoom = (z: number) =>
   Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 100) / 100));
+
+/** Phone-sized layout: rail fly-outs become bottom sheets and the page fan is
+ * skipped. Mirrors the media query in App.css. */
+const PHONE_QUERY = "(max-width: 720px), (max-height: 500px)";
+/** Touch-only devices: no mouse to hover with, taps instead of clicks. */
+const TOUCH_QUERY = "(hover: none) and (pointer: coarse)";
+/** Largest bitmap we ask the browser for; mobile browsers refuse bigger canvases. */
+const MAX_CANVAS_AREA = window.matchMedia(TOUCH_QUERY).matches ? 16_000_000 : 64_000_000;
 
 const FONTS = [
   "Arial",
@@ -832,6 +844,18 @@ function pct(value: number, total: number) {
   return `${(value / total) * 100}%`;
 }
 
+function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const update = () => setMatches(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, [query]);
+  return matches;
+}
+
 export default function App() {
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [source, setSource] = useState<Uint8Array | null>(null);
@@ -918,6 +942,20 @@ export default function App() {
   // Last known page size, so the sheet keeps its footprint while re-rendering.
   const lastViewport = useRef<PageViewport | null>(null);
   const bitmapTask = useRef<ReturnType<PDFPageProxy["render"]> | null>(null);
+  const phone = useMediaQuery(PHONE_QUERY);
+  const touchOnly = useMediaQuery(TOUCH_QUERY);
+  // Width the page gets at 100% zoom: its natural size, or the canvas width
+  // when that is narrower (phones), so zooming starts from "fit to width".
+  const [fitWidth, setFitWidth] = useState<number | null>(null);
+  const fitRef = useRef<number | null>(null);
+  fitRef.current = fitWidth;
+  // Touch: fingers on the page (client coords), the pinch they form, and the
+  // fling that follows a one-finger pan.
+  const touches = useRef(new Map<number, Point>());
+  const pinch = useRef<{ dist: number; mid: Point; zoom: number } | null>(null);
+  const fling = useRef(0);
+  const velocity = useRef({ x: 0, y: 0, t: 0, vx: 0, vy: 0 });
+  const imageInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!panelOpen) return;
@@ -947,7 +985,15 @@ export default function App() {
     bitmapTask.current?.cancel();
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const density = Math.min(6, (window.devicePixelRatio || 1) * Math.max(1, zoomLevel));
+    // Sharp for the size the page is shown at: on narrow screens it is scaled
+    // down to fit, so fewer pixels are needed. Mobile browsers also cap the
+    // area a canvas may have.
+    const shown = Math.min(1, (fitRef.current ?? view.width) / view.width);
+    const density = Math.min(
+      6,
+      (window.devicePixelRatio || 1) * Math.max(1, zoomLevel) * shown,
+      Math.sqrt(MAX_CANVAS_AREA / (view.width * view.height)),
+    );
     canvas.width = Math.ceil(view.width * density);
     canvas.height = Math.ceil(view.height * density);
     const task = page.render({
@@ -1072,7 +1118,7 @@ export default function App() {
     }, 150);
     return () => window.clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [zoom]);
+  }, [zoom, fitWidth]);
 
   // Ctrl/⌘ + wheel (and trackpad pinch, which the browser reports the same way).
   useEffect(() => {
@@ -1209,6 +1255,37 @@ export default function App() {
     observer.observe(el);
     return () => observer.disconnect();
   }, [viewport]);
+
+  // Width available to the page inside the canvas padding.
+  useEffect(() => {
+    const box = canvasBox.current;
+    if (!box) return;
+    const update = () => {
+      const cs = getComputedStyle(box);
+      const w = box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      setFitWidth(w > 0 ? w : null);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(box);
+    return () => observer.disconnect();
+  }, []);
+
+  // Phones: the inspector sheet rises from the bottom; if it would cover the
+  // selected text box, scroll the box up into the clear.
+  useEffect(() => {
+    if (!phone || !viewport || !selected || selected.kind !== "text" || editingId) return;
+    const sheet = floatbar.current;
+    const overlay = overlayCanvas.current;
+    const box = canvasBox.current;
+    if (!sheet || !overlay || !box) return;
+    const limit = sheet.getBoundingClientRect().top - 16;
+    const o = overlay.getBoundingClientRect();
+    const r = itemRect(selected);
+    const bottom = o.top + ((r.y + r.h) * o.width) / viewport.width;
+    if (bottom > limit) box.scrollBy({ top: bottom - limit, behavior: "smooth" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phone, selectedId, editingId]);
 
   useEffect(() => {
     if (!editingId) return;
@@ -1855,7 +1932,7 @@ export default function App() {
       await loaded.decode();
       setImage(loaded);
       setTool("image");
-      setStatus("Click the page to place the image, then drag it or its corners.");
+      setStatus(`${touchOnly ? "Tap" : "Click"} the page to place the image, then drag it or its corners.`);
     } catch {
       setStatus("Could not read that image. Try PNG or JPEG.");
     } finally {
@@ -1871,11 +1948,13 @@ export default function App() {
     };
   }
 
-  function hitTest(p: Point): Item | null {
+  /** Topmost text or image under a point; `slop` widens the target for fingers. */
+  function hitTest(p: Point, slop = 0): Item | null {
     for (let i = items.length - 1; i >= 0; i--) {
       const item = items[i];
       if (item.kind !== "text" && item.kind !== "image") continue;
-      if (inRect(p, itemRect(item))) return item;
+      const r = itemRect(item);
+      if (inRect(p, { x: r.x - slop, y: r.y - slop, w: r.w + slop * 2, h: r.h + slop * 2 })) return item;
     }
     return null;
   }
@@ -1975,7 +2054,7 @@ export default function App() {
     item.width = Math.max(r.w, Math.ceil(measureCtx.measureText(item.text).width) + size * 0.6);
     setItems([...(itemsRef.current[pageNumber] ?? []), cover, item]);
     setSelectedId(item.id);
-    setStatus("Text lifted · drag to move, double-click to retype");
+    setStatus(`Text lifted · drag to move, ${touchOnly ? "double-tap" : "double-click"} to retype`);
   }
 
   /** Cover the original image and put a movable copy (cut from the render) on top. */
@@ -2110,17 +2189,45 @@ export default function App() {
   }
 
   function pointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
-    if (!viewport || busy || event.button !== 0 || !event.isPrimary) return;
+    if (!viewport || busy || event.button !== 0) return;
+    const touch = event.pointerType === "touch";
+    if (touch) {
+      stopFling();
+      // The first finger down is always primary, so anything still in the
+      // map is a lift-off we never saw.
+      if (event.isPrimary) {
+        touches.current.clear();
+        pinch.current = null;
+      }
+      touches.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      // Capture so the lift-off reaches us even if the finger slid off the page.
+      event.currentTarget.setPointerCapture(event.pointerId);
+      if (touches.current.size === 2) {
+        // A second finger turns whatever the first one started into a pinch.
+        cancelDrag();
+        const [a, b] = [...touches.current.values()];
+        pinch.current = {
+          dist: Math.max(1, Math.hypot(b.x - a.x, b.y - a.y)),
+          mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+          zoom: zoomRef.current,
+        };
+        return;
+      }
+      if (touches.current.size > 2 || pinch.current) return;
+    }
+    if (!event.isPrimary) return;
     // Stop the browser's mousedown focus change from blurring a text box we
     // are about to focus.
     event.preventDefault();
     const p = point(event);
+    // Fingers are less precise than a mouse: accept taps just outside an item.
+    const slop = touch ? 10 / cssScale : 0;
     if (editingId) {
       finishEditing();
       return;
     }
     if (tool === "edit") {
-      const hit = hitTest(p);
+      const hit = hitTest(p, slop);
       if (hit) {
         setSelectedId(hit.id);
         startMove(hit, p, event);
@@ -2137,7 +2244,7 @@ export default function App() {
       return;
     }
     if (tool === "select" || tool === "text" || tool === "image" || tool === "sign") {
-      const hit = hitTest(p);
+      const hit = hitTest(p, slop);
       if (hit) {
         if (tool === "select" && event.shiftKey) {
           // Shift-click adds to or removes from the selection.
@@ -2155,8 +2262,17 @@ export default function App() {
       }
     }
     if (tool === "select") {
-      // Empty space: start a marquee (desktop-style rubber band).
       setSelection([]);
+      if (touch) {
+        // A finger on empty space scrolls the page; the marquee is for mice.
+        const box = canvasBox.current;
+        if (!box) return;
+        drag.current = { mode: "pan", x: event.clientX, y: event.clientY, left: box.scrollLeft, top: box.scrollTop };
+        velocity.current = { x: event.clientX, y: event.clientY, t: performance.now(), vx: 0, vy: 0 };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        return;
+      }
+      // Empty space: start a marquee (desktop-style rubber band).
       drag.current = { mode: "marquee", start: p };
       setMarquee({ x: p.x, y: p.y, w: 0, h: 0 });
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -2199,7 +2315,8 @@ export default function App() {
     }
     if (tool === "image") {
       if (!image) {
-        setStatus("Paste an image (Ctrl+V / ⌘+V) or drop one onto the page, then click to place it.");
+        // Nothing to place yet: offer a file picker (the only route on phones).
+        imageInput.current?.click();
         return;
       }
       const width = Math.min(size * 10, viewport.width / 2);
@@ -2279,7 +2396,47 @@ export default function App() {
   }
 
   function pointerMove(event: ReactPointerEvent<Element>) {
+    if (event.pointerType === "touch" && touches.current.has(event.pointerId)) {
+      touches.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      const g = pinch.current;
+      if (g) {
+        if (touches.current.size < 2) return;
+        // Two fingers: pan by the midpoint's travel, zoom by the spread.
+        const box = canvasBox.current;
+        if (!box) return;
+        const [a, b] = [...touches.current.values()];
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        box.scrollLeft -= mid.x - g.mid.x;
+        box.scrollTop -= mid.y - g.mid.y;
+        g.mid = mid;
+        const next = clampZoom((g.zoom * Math.hypot(b.x - a.x, b.y - a.y)) / g.dist);
+        if (next !== zoomRef.current) {
+          const rect = box.getBoundingClientRect();
+          zoomAnchor.current = { x: mid.x - rect.left, y: mid.y - rect.top };
+          setZoom(next);
+        }
+        return;
+      }
+    }
     const d = drag.current;
+    if (d?.mode === "pan") {
+      const box = canvasBox.current;
+      if (!box) return;
+      box.scrollLeft = d.left - (event.clientX - d.x);
+      box.scrollTop = d.top - (event.clientY - d.y);
+      // Smoothed velocity (px/ms) for the fling that follows.
+      const v = velocity.current;
+      const now = performance.now();
+      const dt = Math.max(1, now - v.t);
+      velocity.current = {
+        x: event.clientX,
+        y: event.clientY,
+        t: now,
+        vx: ((event.clientX - v.x) / dt) * 0.6 + v.vx * 0.4,
+        vy: ((event.clientY - v.y) / dt) * 0.6 + v.vy * 0.4,
+      };
+      return;
+    }
     if (tool === "edit" && !d && viewport) {
       const p = point(event);
       const region = findRegion(p);
@@ -2328,6 +2485,14 @@ export default function App() {
   }
 
   function pointerUp(event: ReactPointerEvent<Element>) {
+    if (event.pointerType === "touch" && touches.current.delete(event.pointerId) && pinch.current) {
+      // A pinch ends when either finger lifts; the other does nothing more.
+      if (touches.current.size < 2) pinch.current = null;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      return;
+    }
     if (!event.isPrimary) return;
     const d = drag.current;
     drag.current = null;
@@ -2335,6 +2500,10 @@ export default function App() {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     if (!d) return;
+    if (d.mode === "pan") {
+      startFling();
+      return;
+    }
     if (d.mode === "marquee") {
       const r = marquee;
       setMarquee(null);
@@ -2353,6 +2522,43 @@ export default function App() {
     }
     const now = (itemsRef.current[pageNumber] ?? []).find((i) => i.id === d.id);
     if (now && now !== d.orig) pushHistory(d.snapshot);
+  }
+
+  /** The browser took the touch away, or a finger slid off screen. */
+  function pointerCancel(event: ReactPointerEvent<Element>) {
+    if (event.pointerType === "touch") {
+      touches.current.delete(event.pointerId);
+      if (touches.current.size < 2) pinch.current = null;
+    }
+    cancelDrag();
+  }
+
+  /** Keep scrolling after a quick one-finger pan, slowing like a native list. */
+  function startFling() {
+    const v = velocity.current;
+    const box = canvasBox.current;
+    if (!box || performance.now() - v.t > 100) return;
+    let vx = v.vx;
+    let vy = v.vy;
+    if (Math.hypot(vx, vy) < 0.25) return;
+    let last = performance.now();
+    const step = (now: number) => {
+      const dt = Math.min(64, now - last);
+      last = now;
+      box.scrollLeft -= vx * dt;
+      box.scrollTop -= vy * dt;
+      const decay = Math.pow(0.996, dt);
+      vx *= decay;
+      vy *= decay;
+      fling.current = Math.hypot(vx, vy) > 0.02 ? requestAnimationFrame(step) : 0;
+    };
+    fling.current = requestAnimationFrame(step);
+  }
+
+  function stopFling() {
+    if (!fling.current) return;
+    cancelAnimationFrame(fling.current);
+    fling.current = 0;
   }
 
   function cancelDrag() {
@@ -2389,7 +2595,11 @@ export default function App() {
     setTool(next);
     if (next !== "select") setSelectedId(null);
     if (next === "image" && !image) {
-      setStatus("Paste an image (Ctrl+V / ⌘+V) or drop one onto the page, then click to place it.");
+      setStatus(
+        touchOnly
+          ? "Tap the page to choose an image, then tap where it should go."
+          : "Paste an image (Ctrl+V / ⌘+V), drop one onto the page, or click the page to choose a file.",
+      );
     }
   }
 
@@ -2592,9 +2802,14 @@ export default function App() {
     { id: "edit", label: "Edit content", shortcut: "E", icon: icon("M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17zM13.5 8.5l3 3M3 4h9") },
   ];
 
+  // On phones the rail's fly-outs are bottom sheets; the canvas gets extra
+  // room below so whatever a sheet covers can still be scrolled into view.
+  const sheetOpen =
+    wmOpen || (panelOpen && (!!TOOL_OPTIONS[tool] || tool === "edit")) || (selected?.kind === "text" && !editingId);
+
   return (
     <div
-      className={`app ${pdf ? "has-pdf" : ""}`}
+      className={`app ${pdf ? "has-pdf" : ""} ${sheetOpen ? "sheet-open" : ""}`}
       onDragOver={(event) => event.preventDefault()}
       onDrop={onDrop}
       onContextMenu={(event) => {
@@ -2603,6 +2818,8 @@ export default function App() {
         const target = event.target as HTMLElement;
         if (target.closest(".rail") || target.closest("input, textarea, select, a")) return;
         event.preventDefault();
+        // On a touch screen this is a long press, not a request to back out.
+        if (touchOnly) return;
         resetToSelect();
       }}
     >
@@ -2704,6 +2921,17 @@ export default function App() {
           event.target.value = "";
         }}
       />
+      <input
+        ref={imageInput}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) void openImage(file);
+          event.target.value = "";
+        }}
+      />
 
       <aside className="rail" aria-label="Tools">
         <button
@@ -2731,7 +2959,9 @@ export default function App() {
               : null;
           const isEdit = t.id === "edit";
           const hasPanel = !!opts || isEdit;
-          const showPanel = hasPanel && ((active && panelOpen) || !!bound);
+          // On phones the inspector is a bottom sheet that would sit between the
+          // text box and the keyboard, so it waits until typing is done.
+          const showPanel = hasPanel && ((active && panelOpen) || (!!bound && !(phone && editingId)));
           const current = bound ? bound.color : isHighlight ? highlightColor : color;
           const setCurrent = (c: string) => {
             if (bound) updateItem(bound.id, { color: c });
@@ -2777,8 +3007,8 @@ export default function App() {
                 <div className="rail-pop tool-pop" role="dialog" aria-label="Edit content">
                   <div className="tool-pop-title">Edit content</div>
                   <p className="tool-pop-help">
-                    Click any text line or image on the page to lift it into an editable, movable copy.
-                    Double-click lifted text to retype it.
+                    {touchOnly ? "Tap" : "Click"} any text line or image on the page to lift it into an editable, movable copy.{" "}
+                    {touchOnly ? "Double-tap" : "Double-click"} lifted text to retype it.
                   </p>
                   <div className="tool-pop-row">
                     <span className="tool-pop-label">OCR</span>
@@ -3073,6 +3303,23 @@ export default function App() {
           {icon("M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z")}
         </button>
         <div className="rail-spacer" />
+        {/* Touch screens have no ⌘Z: undo and redo live in the rail there. */}
+        <button
+          className="rail-btn touch-only"
+          aria-label="Undo"
+          disabled={busy || (organizing ? !structHistory.current.length : !history.current[pageNumber]?.length)}
+          onClick={() => (organizing ? undoStructure() : undo())}
+        >
+          {icon("M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11")}
+        </button>
+        <button
+          className="rail-btn touch-only"
+          aria-label="Redo"
+          disabled={busy || organizing || !future.current[pageNumber]?.length}
+          onClick={redo}
+        >
+          {icon("m15 14 5-5-5-5M20 9H9.5a5.5 5.5 0 0 0 0 11H13")}
+        </button>
         <button
           className="rail-btn danger"
           aria-label="Clear all annotations"
@@ -3086,7 +3333,7 @@ export default function App() {
         </button>
       </aside>
 
-      <section className="canvas" ref={canvasBox}>
+      <section className="canvas" ref={canvasBox} onPointerDownCapture={stopFling}>
         {pdf && organizing ? (
           <div className="organize">
             <div className="organize-bar">
@@ -3094,7 +3341,14 @@ export default function App() {
                 <strong>{docs.find((d) => d.id === activeDocId)?.name}</strong>
                 <span>
                   {pdf.numPages} {pdf.numPages === 1 ? "page" : "pages"}
-                  {selectedPages.size ? ` · ${selectedPages.size} selected` : " · drag to reorder, hover a page for actions"}
+                  {selectedPages.size ? (
+                    ` · ${selectedPages.size} selected`
+                  ) : (
+                    <>
+                      <span className="pointer-only"> · drag to reorder, hover a page for actions</span>
+                      <span className="touch-only"> · tap to select, arrows to reorder</span>
+                    </>
+                  )}
                 </span>
               </div>
               <div className="organize-actions">
@@ -3211,6 +3465,24 @@ export default function App() {
                       </svg>
                     </button>
                   </div>
+                  {(["prev", "next"] as const).map((dir) => (
+                    <button
+                      key={dir}
+                      type="button"
+                      className={`page-move ${dir}`}
+                      aria-label={dir === "prev" ? "Move page earlier" : "Move page later"}
+                      disabled={busy || (dir === "prev" ? i === 0 : i === pdf.numPages - 1)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void movePage(i, dir === "prev" ? i - 1 : i + 1);
+                      }}
+                      onDoubleClick={(event) => event.stopPropagation()}
+                    >
+                      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d={dir === "prev" ? "m14 6-6 6 6 6" : "m10 6 6 6-6 6"} />
+                      </svg>
+                    </button>
+                  ))}
                   <span className="page-num">{i + 1}</span>
                 </div>
               ))}
@@ -3220,9 +3492,9 @@ export default function App() {
           <div
             ref={pageBox}
             className={`page tool-${tool} ${zoom !== 1 ? "zoomed" : ""}`}
-            style={{ width: ((viewport ?? lastViewport.current)?.width ?? 800) * zoom }}
+            style={{ width: Math.min((viewport ?? lastViewport.current)?.width ?? 800, fitWidth ?? Infinity) * zoom }}
           >
-            {viewport && !cropRect &&
+            {viewport && !cropRect && !phone &&
               // Neighbouring pages fan out behind the current sheet: previous
               // pages to the left, following pages to the right. Deeper sheets
               // render first so nearer ones paint on top. Click one to jump.
@@ -3263,7 +3535,7 @@ export default function App() {
               onPointerDown={pointerDown}
               onPointerMove={pointerMove}
               onPointerUp={pointerUp}
-              onPointerCancel={cancelDrag}
+              onPointerCancel={pointerCancel}
               onDoubleClick={(event) => {
                 if (!viewport) return;
                 const hit = hitTest(point(event));
@@ -3552,8 +3824,10 @@ export default function App() {
                 <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
               </svg>
               <p>
-                Click or drop a PDF here, or paste it with{" "}
-                <kbd>Ctrl</kbd>+<kbd>V</kbd> / <kbd>⌘</kbd>+<kbd>V</kbd>.
+                <span className="pointer-only">
+                  Click or drop a PDF here, or paste it with <kbd>Ctrl</kbd>+<kbd>V</kbd> / <kbd>⌘</kbd>+<kbd>V</kbd>.
+                </span>
+                <span className="touch-only">Tap to choose a PDF.</span>
               </p>
             </div>
             <p className="privacy">
@@ -3629,7 +3903,7 @@ export default function App() {
           </div>
         )}
         <div className="bottombar-right">
-          <p className="status" role="status" title={status}>
+          <p key={status} className="status" role="status" title={status}>
             {status}
           </p>
           {pdf && (
