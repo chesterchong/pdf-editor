@@ -1263,13 +1263,7 @@ export default function App() {
         target instanceof Element && !!target.closest('button, a, [role="button"], [role="tab"]');
       if (event.key === "Escape" || (event.key === "Enter" && !typing && !onControl)) {
         if (typing && event.key === "Escape") (target as HTMLElement).blur();
-        if (cropRect) setCropRect(null);
-        if (linkEdit) setLinkEdit(null);
-        if (editingId) finishEditing();
-        if (organizing) setOrganizing(false);
-        setPanelOpen(false);
-        setSelectedId(null);
-        if (tool !== "select") pickTool("select");
+        resetToSelect();
         return;
       }
       const mod = event.metaKey || event.ctrlKey;
@@ -1812,6 +1806,19 @@ export default function App() {
       if (inRect(p, itemRect(item))) return item;
     }
     return null;
+  }
+
+  /** Back out of whatever is active and return to the Select tool. Used by
+   * Escape, Enter and right-click. */
+  function resetToSelect() {
+    if (cropRect) setCropRect(null);
+    if (linkEdit) setLinkEdit(null);
+    if (editingId) finishEditing();
+    if (organizing) setOrganizing(false);
+    setPanelOpen(false);
+    setWmOpen(false);
+    setSelectedId(null);
+    if (tool !== "select") pickTool("select");
   }
 
   /** Hand focus back to the text box after using a toolbar control. */
@@ -2485,6 +2492,14 @@ export default function App() {
       className={`app ${pdf ? "has-pdf" : ""}`}
       onDragOver={(event) => event.preventDefault()}
       onDrop={onDrop}
+      onContextMenu={(event) => {
+        // Right-click anywhere but the tool rail (or a text field) cancels the
+        // current tool and returns to Select.
+        const target = event.target as HTMLElement;
+        if (target.closest(".rail") || target.closest("input, textarea, select, a")) return;
+        event.preventDefault();
+        resetToSelect();
+      }}
     >
       <header className="topbar">
         <div className="topbar-left">
