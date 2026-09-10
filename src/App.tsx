@@ -190,6 +190,9 @@ const QUICK_COLORS = ["#172033", "#1d4ed8", "#dc2626", "#16a34a", "#d97706", "#7
 // Soft marker tints; they blend with multiply, so lighter means gentler.
 const QUICK_HIGHLIGHTS = ["#fff3a3", "#c9f5e3", "#cfeafe", "#fdddf0", "#fee4c4", "#e8e3fe", "#fedadb", "#e9edf4"];
 
+/** Text written to the system clipboard when items are copied. */
+const CLIPBOARD_MARK = "pdf-studio:items";
+
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 4;
 const ZOOM_STEP = 1.25;
@@ -872,6 +875,10 @@ export default function App() {
   const selectedId = selection.length === 1 ? selection[0] : null;
   const setSelectedId = (id: string | null) => setSelection(id ? [id] : []);
   const [marquee, setMarquee] = useState<Rect | null>(null);
+  // Internal clipboard for items. Copy also writes a marker to the system
+  // clipboard so a later external copy (an image, say) takes precedence.
+  const clipboard = useRef<Item[]>([]);
+  const pasteCount = useRef(0);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [cssScale, setCssScale] = useState(1);
   const [busy, setBusy] = useState(false);
@@ -1232,8 +1239,16 @@ export default function App() {
       if (imageFile && pdf) {
         event.preventDefault();
         void openImage(imageFile);
-      } else if (files.length && !pdf) {
+        return;
+      }
+      if (files.length && !pdf) {
         setStatus("That is not a PDF. Paste or open a PDF file to get started.");
+        return;
+      }
+      const text = event.clipboardData?.getData("text/plain") ?? "";
+      if (pdf && clipboard.current.length && (text === CLIPBOARD_MARK || !text)) {
+        event.preventDefault();
+        pasteItems();
       }
     }
     window.addEventListener("paste", onPaste);
@@ -1283,6 +1298,21 @@ export default function App() {
           if (!event.shiftKey) undoStructure();
         } else if (event.shiftKey) redo();
         else undo();
+        return;
+      }
+      if (mod && !typing && (key === "c" || key === "x") && selection.length && !organizing) {
+        event.preventDefault();
+        copySelection();
+        if (key === "x") {
+          removeItems(selection);
+          setStatus(selection.length === 1 ? "Cut" : `Cut ${selection.length} items`);
+        }
+        return;
+      }
+      if (mod && !typing && key === "d" && selection.length && !organizing) {
+        event.preventDefault();
+        copySelection(false);
+        pasteItems();
         return;
       }
       if (mod && !typing && key === "y") {
@@ -1418,6 +1448,31 @@ export default function App() {
       ),
       record,
     );
+  }
+
+  /** Copy the selected items to the internal clipboard (and mark the system one). */
+  function copySelection(markSystem = true) {
+    const picked = items.filter((i) => selection.includes(i.id) && i.kind !== "cover" && i.kind !== "link");
+    if (!picked.length) return;
+    clipboard.current = picked;
+    pasteCount.current = 0;
+    if (markSystem) {
+      navigator.clipboard?.writeText(CLIPBOARD_MARK).catch(() => undefined);
+      setStatus(picked.length === 1 ? "Copied" : `Copied ${picked.length} items`);
+    }
+  }
+
+  /** Paste clipboard items onto the current page, nudged so copies don't stack. */
+  function pasteItems() {
+    if (!clipboard.current.length || !pdf) return;
+    pasteCount.current += 1;
+    const d = 16 * pasteCount.current;
+    const copies = shiftItems(clipboard.current, d, d).map((i) => ({ ...i, id: uid() }) as Item);
+    finishEditing();
+    setItems([...(itemsRef.current[pageNumber] ?? []), ...copies]);
+    setSelection(copies.map((c) => c.id));
+    if (tool !== "select") pickTool("select");
+    setStatus(copies.length === 1 ? "Pasted" : `Pasted ${copies.length} items`);
   }
 
   function removeItems(ids: string[]) {
