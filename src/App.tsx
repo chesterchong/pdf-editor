@@ -151,7 +151,8 @@ type Handle = "nw" | "ne" | "sw" | "se" | "e" | "w";
 type Drag =
   | { mode: "stroke" }
   | { mode: "highlight"; start: Point }
-  | { mode: "move"; id: string; start: Point; orig: Item; snapshot: Item[] }
+  | { mode: "marquee"; start: Point }
+  | { mode: "move"; id: string; start: Point; orig: Item; snapshot: Item[]; group?: { id: string; orig: Item }[] }
   | {
       mode: "resize";
       id: string;
@@ -865,7 +866,12 @@ export default function App() {
   const [font, setFont] = useState("Arial");
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   const [draft, setDraft] = useState<Item | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Selection can hold several items (marquee or shift-click). Panels and
+  // handles only bind when exactly one item is selected.
+  const [selection, setSelection] = useState<string[]>([]);
+  const selectedId = selection.length === 1 ? selection[0] : null;
+  const setSelectedId = (id: string | null) => setSelection(id ? [id] : []);
+  const [marquee, setMarquee] = useState<Rect | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [cssScale, setCssScale] = useState(1);
   const [busy, setBusy] = useState(false);
@@ -963,6 +969,7 @@ export default function App() {
 
   const items = annotations[pageNumber] ?? [];
   const selected = items.find((i) => i.id === selectedId) ?? null;
+  const selectedItems = selection.length > 1 ? items.filter((i) => selection.includes(i.id)) : [];
   const editing =
     (items.find((i) => i.id === editingId) as TextItem | undefined) ?? null;
 
@@ -1375,9 +1382,13 @@ export default function App() {
           return;
         }
       }
-      if ((event.key === "Delete" || event.key === "Backspace") && selectedId) {
+      if ((event.key === "Delete" || event.key === "Backspace") && selection.length) {
         event.preventDefault();
-        removeItem(selectedId);
+        removeItems(selection);
+      }
+      if (mod && key === "a" && pdf && tool === "select") {
+        event.preventDefault();
+        setSelection(items.filter((i) => i.kind !== "cover" && i.kind !== "link").map((i) => i.id));
       }
     }
     window.addEventListener("keydown", onKey);
@@ -1409,10 +1420,16 @@ export default function App() {
     );
   }
 
+  function removeItems(ids: string[]) {
+    if (!ids.length) return;
+    const gone = new Set(ids);
+    setItems((itemsRef.current[pageNumber] ?? []).filter((i) => !gone.has(i.id)));
+    setSelection((sel) => sel.filter((id) => !gone.has(id)));
+    if (editingId && gone.has(editingId)) setEditingId(null);
+  }
+
   function removeItem(id: string) {
-    setItems((itemsRef.current[pageNumber] ?? []).filter((i) => i.id !== id));
-    if (selectedId === id) setSelectedId(null);
-    if (editingId === id) setEditingId(null);
+    removeItems([id]);
   }
 
   /** Remove every annotation on every page; each page stays undoable. */
@@ -1843,13 +1860,14 @@ export default function App() {
     setEditingId(null);
   }
 
-  function startMove(item: Item, p: Point, event: ReactPointerEvent<Element>) {
+  function startMove(item: Item, p: Point, event: ReactPointerEvent<Element>, others: Item[] = []) {
     drag.current = {
       mode: "move",
       id: item.id,
       start: p,
       orig: item,
       snapshot: itemsRef.current[pageNumber] ?? [],
+      group: others.length ? others.map((o) => ({ id: o.id, orig: o })) : undefined,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
   }
@@ -2066,13 +2084,27 @@ export default function App() {
     if (tool === "select" || tool === "text" || tool === "image" || tool === "sign") {
       const hit = hitTest(p);
       if (hit) {
+        if (tool === "select" && event.shiftKey) {
+          // Shift-click adds to or removes from the selection.
+          setSelection((sel) => (sel.includes(hit.id) ? sel.filter((id) => id !== hit.id) : [...sel, hit.id]));
+          return;
+        }
+        if (tool === "select" && selection.length > 1 && selection.includes(hit.id)) {
+          // Dragging one member of a group moves the whole group.
+          startMove(hit, p, event, selectedItems.filter((i) => i.id !== hit.id));
+          return;
+        }
         setSelectedId(hit.id);
         startMove(hit, p, event);
         return;
       }
     }
     if (tool === "select") {
-      setSelectedId(null);
+      // Empty space: start a marquee (desktop-style rubber band).
+      setSelection([]);
+      drag.current = { mode: "marquee", start: p };
+      setMarquee({ x: p.x, y: p.y, w: 0, h: 0 });
+      event.currentTarget.setPointerCapture(event.pointerId);
       return;
     }
     if (tool === "text" || tool === "sign") {
@@ -2207,6 +2239,17 @@ export default function App() {
     }
     if (!d || !viewport || !event.isPrimary) return;
     const p = point(event);
+    if (d.mode === "marquee") {
+      const x = Math.max(0, Math.min(d.start.x, p.x));
+      const y = Math.max(0, Math.min(d.start.y, p.y));
+      setMarquee({
+        x,
+        y,
+        w: Math.min(viewport.width, Math.max(d.start.x, p.x)) - x,
+        h: Math.min(viewport.height, Math.max(d.start.y, p.y)) - y,
+      });
+      return;
+    }
     if (d.mode === "stroke") {
       setDraft((current) =>
         current && current.kind === "stroke"
@@ -2219,14 +2262,11 @@ export default function App() {
         current && current.kind === "highlight" ? { ...current, rects } : current,
       );
     } else if (d.mode === "move") {
-      const o = d.orig;
-      if (o.kind === "text" || o.kind === "image") {
-        updateItem(
-          o.id,
-          { x: o.x + p.x - d.start.x, y: o.y + p.y - d.start.y },
-          false,
-        );
-      }
+      const dx = p.x - d.start.x;
+      const dy = p.y - d.start.y;
+      const moved = new Map<string, Item>();
+      for (const { id, orig } of [{ id: d.id, orig: d.orig }, ...(d.group ?? [])]) moved.set(id, shiftItems([orig], dx, dy)[0]);
+      setItems((itemsRef.current[pageNumber] ?? []).map((i) => moved.get(i.id) ?? i), false);
     } else {
       applyResize(d, p);
     }
@@ -2240,6 +2280,15 @@ export default function App() {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     if (!d) return;
+    if (d.mode === "marquee") {
+      const r = marquee;
+      setMarquee(null);
+      if (!r || (r.w < 3 && r.h < 3)) return;
+      const hit = items.filter((i) => i.kind !== "cover" && i.kind !== "link" && rectOverlap(itemRect(i), r) > 0).map((i) => i.id);
+      setSelection(hit);
+      if (hit.length > 1) setStatus(`${hit.length} items selected`);
+      return;
+    }
     if (d.mode === "stroke" || d.mode === "highlight") {
       setDraft((current) => {
         if (current) addItem({ ...current, id: uid() });
@@ -2255,6 +2304,7 @@ export default function App() {
     const d = drag.current;
     drag.current = null;
     setDraft(null);
+    setMarquee(null);
     if (d && (d.mode === "move" || d.mode === "resize")) {
       setItems(d.snapshot, false);
     }
@@ -3297,6 +3347,33 @@ export default function App() {
               </div>
             )}
 
+            {viewport &&
+              selectedItems.map((item) => {
+                const r = itemRect(item);
+                return (
+                  <div
+                    key={item.id}
+                    className="selection multi"
+                    style={{
+                      left: pct(r.x, viewport.width),
+                      top: pct(r.y, viewport.height),
+                      width: pct(r.w, viewport.width),
+                      height: pct(r.h, viewport.height),
+                    }}
+                  />
+                );
+              })}
+            {viewport && marquee && (
+              <div
+                className="marquee"
+                style={{
+                  left: pct(marquee.x, viewport.width),
+                  top: pct(marquee.y, viewport.height),
+                  width: pct(marquee.w, viewport.width),
+                  height: pct(marquee.h, viewport.height),
+                }}
+              />
+            )}
             {viewport && selected && selectedRect && !editing && (
               <div
                 className={`selection ${selected.kind === "text" && selected.signature ? "signature" : ""}`}

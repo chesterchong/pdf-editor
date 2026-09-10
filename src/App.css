@@ -1022,6 +1022,19 @@ button.link:hover:not(:disabled) {
   transform: translateX(-50%);
 }
 
+/* ---- Marquee (rubber-band) selection ---- */
+.marquee {
+  position: absolute;
+  z-index: 12;
+  border: 1px solid #2563eb99;
+  border-radius: 2px;
+  background: #2563eb1a;
+  pointer-events: none;
+}
+.selection.multi::before {
+  background: #2563eb1a;
+}
+
 /* ---- Edit tool: hover outline over liftable page content ---- */
 .edit-hover {
   position: absolute;
