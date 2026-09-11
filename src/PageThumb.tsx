@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
+import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 type Props = {
   pdf: PDFDocumentProxy;

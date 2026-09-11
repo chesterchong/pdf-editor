@@ -5,6 +5,7 @@ html,
 body,
 #root {
   height: 100%;
+  height: 100dvh;
 }
 body {
   margin: 0;
@@ -12,6 +13,7 @@ body {
   color: #172033;
   font-family: Inter, system-ui, sans-serif;
   overflow: hidden;
+  overscroll-behavior: none;
 }
 
 /* ---- App frame: top bar / rail + canvas / bottom bar ---- */
@@ -279,6 +281,14 @@ button.link:hover:not(:disabled) {
   padding: 8px 0;
   border-right: 1px solid #17203314;
   overflow: visible;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+/* Buttons keep their size; a short window scrolls the rail (see the phone
+   layout) instead of squashing them. */
+.rail > * {
+  flex-shrink: 0;
 }
 .rail-btn {
   position: relative;
@@ -749,10 +759,13 @@ button.link:hover:not(:disabled) {
   /* 84px fan on both sides and below (3 sheets × 28px) beyond the bars. */
   padding: 80px 112px 158px 168px;
   background: #e6eaf2;
+  touch-action: pan-x pan-y;
+  overscroll-behavior: contain;
 }
 .page {
   position: relative;
   z-index: 0; /* own stacking context so the page stack can sit behind the canvas */
+  -webkit-touch-callout: none;
   max-width: 100%;
   transition: width 0.08s ease-out;
   margin: 0 auto;
@@ -1006,6 +1019,26 @@ button.link:hover:not(:disabled) {
 .page-actions button.danger:hover:not(:disabled) {
   background: #dc26261a;
   color: #dc2626;
+}
+/* Reorder buttons for touch screens, where there is no drag and drop. */
+.page-move {
+  display: none;
+  position: absolute;
+  top: 50%;
+  width: 30px;
+  min-height: 30px;
+  padding: 0;
+  border: 1px solid #ffffffb3;
+  border-radius: 50%;
+  background: #ffffffe6;
+  color: #475569;
+  box-shadow: 0 0 0 0.5px #17203314, 0 6px 16px -8px #1720334d;
+  transform: translateY(-50%);
+}
+.page-move.prev { left: 4px; }
+.page-move.next { right: 4px; }
+.page-move:disabled {
+  opacity: 0.3;
 }
 .page-num {
   position: absolute;
@@ -1616,20 +1649,311 @@ kbd {
   color: #94a3b8;
 }
 
-@media (max-width: 640px) {
-  .filename input {
-    width: 120px;
-  }
-  .tabs {
-    margin: 0 8px;
-  }
-  .bottombar-left span,
-  .pill,
-  .zoomctl,
-  .bottombar .status {
+/* ---- Touch screens (any size) ----
+   No hover: tooltips never show, hover-revealed controls are always on, and
+   copy says tap instead of click. Targets grow to finger size. */
+.touch-only {
+  display: none;
+}
+@media (hover: none) and (pointer: coarse) {
+  .pointer-only {
     display: none;
   }
+  .touch-only {
+    display: inline;
+  }
+  .rail-btn.touch-only,
+  .page-move {
+    display: inline-flex;
+  }
+  [data-tip]::after {
+    display: none;
+  }
+  button {
+    -webkit-tap-highlight-color: transparent;
+  }
+  .page-check {
+    opacity: 1;
+  }
+  .page-actions {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translate(-50%, 0);
+  }
+  .page-card,
+  .page-card:hover {
+    cursor: default;
+    transform: none;
+  }
+  .tab-close {
+    opacity: 1;
+  }
+  .sheet:hover:not(:disabled) {
+    box-shadow: 0 0 0 1px #17203314, 0 1px 3px #17203326, 0 12px 32px -16px #17203352;
+  }
+  /* Resize dots keep their look; the invisible hit area grows to ~38px. */
+  .handle.nw::before,
+  .handle.ne::before,
+  .handle.sw::before,
+  .handle.se::before {
+    inset: -15px;
+  }
+  .handle.e,
+  .handle.w {
+    width: 28px;
+  }
+  .quick-swatch {
+    flex-basis: 22px;
+    width: 22px;
+    height: 22px;
+  }
+  .cp-pop .cp-grid {
+    grid-template-columns: repeat(10, 22px);
+    gap: 6px 4px;
+  }
+  .cp-pop {
+    width: 276px;
+  }
+  .cp-pop .cp-swatch,
+  .cp-pop .cp-icon {
+    width: 22px;
+    height: 22px;
+  }
+}
+
+/* ---- Phones (and very short windows) ----
+   The rail narrows, its fly-outs become bottom sheets, the page fan is
+   dropped and the canvas padding clears the floating bars instead of hiding
+   content under them. Bars go solid: cheaper than glass on a phone GPU, and
+   fixed-position sheets need an ancestor without backdrop-filter. */
+@media (max-width: 720px), (max-height: 500px) {
+  .app {
+    grid-template-columns: 48px 1fr;
+  }
+  .topbar,
+  .rail,
+  .bottombar {
+    background: #f8faffee;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  .topbar {
+    padding: 0 10px;
+  }
+  .topbar-left,
+  .topbar-right {
+    gap: 8px;
+  }
+  .has-pdf .brand > span,
+  .pill {
+    display: none;
+  }
+  .tabs {
+    margin: 0 2px;
+    padding: 8px 6px 0;
+  }
+  .tab {
+    flex: 0 1 150px;
+    min-width: 96px;
+  }
+  .filename input {
+    width: 84px;
+  }
+  .topbar-right button.primary {
+    padding: 8px 12px;
+  }
+
+  .rail {
+    gap: 2px;
+    padding: 6px 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-width: none;
+  }
+  .rail::-webkit-scrollbar {
+    display: none;
+  }
+  .rail-btn.active::before {
+    left: -4px;
+  }
+  .rail-sep {
+    margin: 4px 0;
+  }
+
   .canvas {
-    padding: 10px;
+    padding: 62px 12px 58px 60px;
+  }
+  .app.sheet-open .canvas {
+    padding-bottom: 60vh;
+  }
+  .sheet {
+    display: none;
+  }
+
+  /* Fly-outs rise from the bottom edge as sheets. */
+  .rail-pop,
+  .rail-item.low > .rail-pop {
+    position: fixed;
+    top: auto;
+    right: 0;
+    bottom: 46px;
+    left: 48px;
+    z-index: 50;
+    width: auto;
+    max-height: calc(100dvh - 110px);
+    overflow-y: auto;
+    padding: 12px 16px 16px;
+    border-radius: 16px 16px 0 0;
+    border-bottom: none;
+    background: #ffffff;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: 0 0 0 0.5px #17203314, 0 -12px 40px -12px #1720334d;
+    animation: sheet-in 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .tool-pop {
+    width: auto;
+  }
+  .tool-pop-title {
+    min-height: 28px;
+    font-size: 14px;
+  }
+  .tool-pop-row {
+    min-height: 36px;
+  }
+  /* The palette opens in the middle of the screen instead of off the sheet. */
+  .rail .cp-pop,
+  .rail .quick-colors .cp-pop {
+    position: fixed;
+    top: 50%;
+    right: auto;
+    bottom: auto;
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+
+  /* Bottom bar: page navigation and the zoom readout; the rest is a toast. */
+  .bottombar {
+    padding: 0 8px;
+  }
+  .bottombar-left {
+    left: 56px;
+  }
+  .bottombar-left span,
+  .has-pdf .bottombar-left {
+    display: none;
+  }
+  .bottombar .pages {
+    gap: 4px;
+  }
+  .bottombar-right {
+    right: 8px;
+    gap: 0;
+    max-width: none;
+  }
+  .zoomctl button:not(.zoom-value) {
+    display: none;
+  }
+  .zoomctl .zoom-value {
+    min-width: 0;
+    padding: 0 8px;
+  }
+  .bottombar .status {
+    position: fixed;
+    top: 60px;
+    left: 50%;
+    z-index: 40;
+    max-width: calc(100vw - 32px);
+    padding: 7px 14px;
+    border-radius: 999px;
+    background: #172033e6;
+    color: white;
+    font-size: 12.5px;
+    font-weight: 500;
+    text-align: center;
+    transform: translateX(-50%);
+    pointer-events: none;
+    animation: toast 5s ease forwards;
+  }
+  .bottombar .status:empty {
+    display: none;
+  }
+
+  /* Welcome */
+  .welcome {
+    gap: 14px;
+  }
+  .empty {
+    gap: 12px;
+    padding: 40px 20px;
+    border-radius: 18px;
+  }
+  .privacy {
+    padding: 10px 14px;
+    font-size: 12.5px;
+  }
+
+  /* Organize: two columns of fluid cards, actions wrap. */
+  .organize-bar {
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 12px;
+    padding: 8px 10px;
+    border-radius: 12px;
+  }
+  .organize-info {
+    flex: 1 1 100%;
+  }
+  .organize-actions {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: 2px;
+  }
+  .organize-actions button {
+    min-height: 30px;
+    padding: 0 9px;
+    font-size: 12.5px;
+  }
+  .organize-actions .sep {
+    display: none;
+  }
+  .page-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .page-card {
+    padding: 8px 8px 28px;
+  }
+  .page-card .thumb {
+    width: 100% !important;
+    height: auto !important;
+  }
+  .page-actions {
+    bottom: 26px;
+    gap: 0;
+    padding: 2px;
+  }
+  .page-actions button {
+    width: 28px;
+    min-height: 28px;
+  }
+
+  .link-editor .link-input {
+    width: 150px;
+  }
+}
+@keyframes sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+}
+@keyframes toast {
+  0%,
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
   }
 }

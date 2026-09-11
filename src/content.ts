@@ -21,7 +21,7 @@ import {
   PDFStream,
   decodePDFRawStream,
 } from "pdf-lib";
-import type { PageViewport } from "pdfjs-dist";
+import type { PageViewport } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 export type Rect = { x: number; y: number; w: number; h: number };
 export type Removal = { kind: "text" | "image"; rect: Rect };

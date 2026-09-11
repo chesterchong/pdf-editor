@@ -12,6 +12,7 @@ Live: https://pdf-editor-three-nu.vercel.app
 - Rotate, crop, reorder, remove, extract and combine pages
 - Watermarks
 - Export as a real PDF with selectable text
+- Works on phones and tablets: pinch to zoom, drag to scroll, tool settings open as sheets
 
 ## Privacy, and how to check it yourself
 
